@@ -29,7 +29,7 @@ import {
   type ClientUser,
   type RoomSummary,
 } from "@/lib/types";
-import { apiFetch, handleSessionResponse } from "@/lib/apiFetch";
+import { apiFetch, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 
 const DEMO_ROOM_CODE = "TANDEM";
 
@@ -101,7 +101,13 @@ export default function HomeClient() {
 
   useEffect(() => {
     void (async () => {
-      console.log("[HOME] session init start");
+      console.log("[HOME] SESSION_BOOTSTRAP start");
+      const diagBefore = getAuthDiagnostics();
+      console.log("[HOME] COOKIE_AVAILABLE", { available: diagBefore.cookieAvailable });
+      console.log("[HOME] MEMORY_TOKEN_AVAILABLE", { available: diagBefore.memoryToken });
+      console.log("[HOME] WINDOW_NAME_TOKEN_AVAILABLE", { available: diagBefore.windowNameToken });
+      console.log("[HOME] SESSIONSTORAGE available", { available: diagBefore.sessionStorageAvailable, hasToken: diagBefore.sessionStorageToken });
+
       try {
         const res = await apiFetch("/api/session");
         console.log("[HOME] session response", { status: res.status, ok: res.ok });
@@ -115,33 +121,50 @@ export default function HomeClient() {
         handleSessionResponse(data);
         setUser(data.user);
         if (data.sessionToken) {
-          console.log("[HOME] bearer fallback active");
+          console.log("[HOME] bearer fallback active - token stored in memory");
           setBearerFallback(true);
         } else {
           console.log("[HOME] cookie auth active (no token returned)");
         }
+        console.log("[HOME] SESSION_READY", { userId: data.user?.id?.slice(0, 8) });
 
-        // Second check to detect if session persists (cookie or bearer via sessionStorage or in-memory)
+        // Second check to detect if session persists (cookie or memory bearer)
         try {
           const res2 = await apiFetch("/api/session");
           const data2 = (await res2.json()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
           console.log("[HOME] session persistence check", { id1: data.user?.id?.slice(0, 8), id2: data2.user?.id?.slice(0, 8), same: data.user?.id === data2.user?.id });
           handleSessionResponse(data2);
           if (data.user?.id && data2.user?.id && data.user.id !== data2.user.id) {
-            console.warn("[HOME] session not persisting, ids differ - storage may be blocked, but in-memory fallback should handle");
-            // With in-memory fallback, this should not happen, but if it does, we still have a valid session (data2)
-            setUser(data2.user);
-            // Keep bearerFallback true if we have token in memory
-            // Don't set to false here, as in-memory fallback still works
+            console.warn("[HOME] session ids differ, but memory token should keep it - checking stored token");
+            const stored = getStoredToken();
+            console.log("[HOME] after id mismatch, stored token present", { present: !!stored });
+            if (stored) {
+              // Memory token exists, so session is actually persisting via bearer
+              setUser(data2.user);
+            } else {
+              console.warn("[HOME] no stored token after mismatch - will try to use second session");
+              setUser(data2.user);
+            }
           }
         } catch (e) {
           console.warn("[HOME] second session check failed", e);
         }
       } catch (e) {
         console.error("[HOME] session init failed", e);
-        setLoadError("Could not establish a session.");
+        const diag = getAuthDiagnostics();
+        const hasToken = !!getStoredToken();
+        console.log("[HOME] failure diagnostics", { ...diag, hasToken });
+        // Only show fatal error if we have no token at all and session request failed
+        if (!hasToken) {
+          setLoadError("Could not establish a session.");
+        } else {
+          console.log("[HOME] session request failed but memory token exists, continuing");
+          // Try to use existing token to load rooms
+        }
       }
+      console.log("[HOME] ROOMS_FETCH start");
       await refresh();
+      console.log("[HOME] ROOMS_FETCH done");
     })();
   }, [refresh]);
 
