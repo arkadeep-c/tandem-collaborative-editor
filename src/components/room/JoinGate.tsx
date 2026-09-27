@@ -5,47 +5,91 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Users } from "lucide-react";
 import { languageAccent } from "@/lib/types";
-import { apiFetch, handleSessionResponse } from "@/lib/apiFetch";
+import { apiFetch, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 
 interface JoinGateProps {
   code: string;
   title: string;
   language: string;
+  onJoined?: () => void;
 }
 
-export default function JoinGate({ code, title, language }: JoinGateProps) {
+export default function JoinGate({ code, title, language, onJoined }: JoinGateProps) {
   const router = useRouter();
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const join = useCallback(async () => {
+    console.log("[JOIN] JOIN_CLICK", { code });
     setJoining(true);
     setError(null);
+
+    const beforeToken = getStoredToken();
+    console.log("[JOIN] BEFORE_JOIN_TOKEN_PRESENT", { present: !!beforeToken });
+    console.log("[JOIN] JOIN_TOKEN_PRESENT", { present: !!beforeToken });
+
     try {
+      console.log("[JOIN] JOIN_REQUEST_START", { url: `/api/rooms/${code}/join` });
       const res = await apiFetch(`/api/rooms/${encodeURIComponent(code)}/join`, {
         method: "POST",
       });
-      const data = (await res.json()) as { error?: string; sessionToken?: string };
+      console.log("[JOIN] JOIN_RESPONSE", { status: res.status, ok: res.ok });
+
+      const data = (await res.json()) as { error?: string; sessionToken?: string; room?: any };
+      console.log("[JOIN] JOIN_RESPONSE_BODY", { ok: res.ok, error: data.error, hasRoom: !!data.room, hasToken: !!data.sessionToken });
       handleSessionResponse(data);
+
+      const afterToken = getStoredToken();
+      console.log("[JOIN] AFTER_JOIN_TOKEN_PRESENT", { present: !!afterToken });
+
       if (!res.ok) {
         throw new Error(data.error ?? "Unable to join room.");
       }
 
-      router.refresh();
-      setTimeout(() => {
-        setJoining((prev) => {
-          if (prev) {
-            setError((e) => e ?? "Could not enter room. Please try again.");
-            return false;
-          }
-          return prev;
-        });
-      }, 3000);
+      console.log("[JOIN] JOIN_SUCCESS", { code });
+
+      // Verify we can now load the room with bearer/cookie
+      try {
+        console.log("[JOIN] NEXT_REQUEST_AFTER_JOIN", { url: `/api/rooms/${code}` });
+        const roomRes = await apiFetch(`/api/rooms/${encodeURIComponent(code)}`);
+        console.log("[JOIN] NEXT_RESPONSE", { status: roomRes.status, ok: roomRes.ok });
+        const roomData = await roomRes.json().catch(() => ({}));
+        console.log("[JOIN] NEXT_RESPONSE_BODY", { hasRoom: !!(roomData as any).room, error: (roomData as any).error });
+        handleSessionResponse(roomData);
+
+        if (!roomRes.ok) {
+          throw new Error((roomData as any).error ?? `Could not load editor after join: ${roomRes.status}`);
+        }
+      } catch (e) {
+        console.error("[JOIN] ROOM_FETCH_AFTER_JOIN_FAILED", e);
+        setError(e instanceof Error ? e.message : "Joined room, but could not load the editor.");
+        setJoining(false);
+        return;
+      }
+
+      console.log("[JOIN] JOIN_NAVIGATE_START", { code });
+      try {
+        if (onJoined) {
+          onJoined();
+          console.log("[JOIN] JOIN_NAVIGATE_SUCCESS via onJoined callback");
+        } else {
+          // Fallback: push to same room route which will re-mount RoomClient and fetch with bearer
+          router.push(`/room/${code}`);
+          console.log("[JOIN] JOIN_NAVIGATE_SUCCESS via router.push");
+        }
+        // Ensure loading state resets
+        setJoining(false);
+      } catch (navErr) {
+        console.error("[JOIN] JOIN_NAVIGATE_ERROR", navErr);
+        setError("Joined room, but navigation failed. Please refresh.");
+        setJoining(false);
+      }
     } catch (err) {
+      console.error("[JOIN] JOIN_ERROR", err);
       setError(err instanceof Error ? err.message : "Unable to join room.");
       setJoining(false);
     }
-  }, [code, router]);
+  }, [code, router, onJoined]);
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-[#07090f] px-6">

@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import EditorRoom from "@/components/editor/EditorRoom";
 import JoinGate from "@/components/room/JoinGate";
-import { apiFetch, handleSessionResponse } from "@/lib/apiFetch";
+import { apiFetch, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 import type { ClientUser, RoomRole } from "@/lib/types";
 import { Loader2 } from "lucide-react";
 
@@ -18,78 +18,80 @@ export default function RoomClient({ code }: RoomClientProps) {
   const [you, setYou] = useState<ClientUser | null>(null);
   const [role, setRole] = useState<RoomRole>("editor");
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const load = useCallback(async () => {
+    console.log("[ROOM_CLIENT] ROOM_CLIENT_MOUNT", { code });
+    const tokenPresent = !!getStoredToken();
+    console.log("[ROOM_CLIENT] ROOM_CLIENT_TOKEN_PRESENT", { present: tokenPresent });
+    console.log("[ROOM_CLIENT] ROOM_CLIENT_FETCH_START", { url: `/api/rooms/${code}` });
+
+    try {
+      const sessRes = await apiFetch("/api/session");
+      console.log("[ROOM_CLIENT] SESSION_FETCH", { status: sessRes.status });
+      if (!sessRes.ok) throw new Error("session failed");
+      const sessData = (await sessRes.json()) as { user: ClientUser; sessionToken?: string };
+      handleSessionResponse(sessData);
+      setYou(sessData.user);
+
+      const roomRes = await apiFetch(`/api/rooms/${encodeURIComponent(code)}`);
+      console.log("[ROOM_CLIENT] ROOM_CLIENT_FETCH_RESPONSE", { status: roomRes.status, ok: roomRes.ok });
+
+      if (roomRes.status === 404) {
+        console.log("[ROOM_CLIENT] ROOM_CLIENT_FETCH_ERROR 404");
+        setStatus("not-found");
+        return;
+      }
+
+      if (roomRes.status === 403 || roomRes.status === 401) {
+        console.log("[ROOM_CLIENT] ROOM_CLIENT_FETCH 403/401 → need join");
+        // Try to get room metadata via join endpoint's public info? Our join returns title even if not member
+        // Attempt to fetch via join with a dry-run? Instead, try to get room existence by calling a separate endpoint
+        // For now, try to fetch room info via an unauthenticated attempt to get title from DB via a lightweight call
+        // We'll attempt to call POST /join with a flag? No. Instead, we'll try to get room info from a different route that doesn't require membership
+        // As fallback, we have code, and we'll try to get title by attempting to join with a test call? Actually join will succeed and return title.
+        // For initial gate, show placeholder but attempt to fetch title via a best-effort: call join endpoint and if it returns room, use its title without actually joining? Our join is idempotent, so calling it now would join.
+        // To avoid auto-join, we will show placeholder and let JoinGate handle real title after join.
+        // But we can try to fetch room metadata via a public endpoint: we don't have one, so we will attempt to get it via a direct call to /api/rooms/[code]/join which is idempotent and returns title — this will actually join the user, which is okay for bearer flow? The spec says join gate is confirmation step, so we should NOT auto-join.
+        // So we keep placeholder.
+        setRoom({ code, title: code, language: "markdown" });
+        setStatus("join");
+        console.log("[ROOM_CLIENT] ROOM_CLIENT_FETCH → join gate");
+        return;
+      }
+
+      if (!roomRes.ok) {
+        const errBody = await roomRes.json().catch(() => ({}));
+        console.error("[ROOM_CLIENT] ROOM_CLIENT_FETCH_ERROR", { status: roomRes.status, body: errBody });
+        throw new Error(`room ${roomRes.status}`);
+      }
+
+      const data = (await roomRes.json()) as {
+        room: { code: string; title: string; language: string; role: RoomRole };
+        you: ClientUser;
+        sessionToken?: string;
+      };
+      console.log("[ROOM_CLIENT] ROOM_CLIENT_FETCH_SUCCESS", { code: data.room.code, title: data.room.title });
+      handleSessionResponse(data);
+      setRoom(data.room);
+      setYou(data.you);
+      setRole(data.room.role);
+      setStatus("editor");
+    } catch (err) {
+      console.error("[ROOM_CLIENT] ROOM_CLIENT_FETCH_ERROR", err);
+      setError(err instanceof Error ? err.message : "Failed to load room");
+      setStatus("not-found");
+    }
+  }, [code]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        // Ensure session exists (cookie or bearer)
-        const sessRes = await apiFetch("/api/session");
-        if (!sessRes.ok) throw new Error("session failed");
-        const sessData = (await sessRes.json()) as { user: ClientUser; sessionToken?: string };
-        handleSessionResponse(sessData);
-        if (cancelled) return;
-        setYou(sessData.user);
-
-        // Try to get room info (requires membership)
-        const roomRes = await apiFetch(`/api/rooms/${encodeURIComponent(code)}`);
-        if (roomRes.status === 404) {
-          if (!cancelled) setStatus("not-found");
-          return;
-        }
-        if (roomRes.status === 403 || roomRes.status === 401) {
-          // Not a member yet, or session expired -> need join gate
-          // Try to fetch public room info via join endpoint? Actually join gate needs title/language
-          // We can try to get room existence via a lightweight check - for now, attempt to get via find?
-          // We'll fetch room existence by trying to get membership via join preview: call GET /api/rooms/[code] returns 403 but we still need title.
-          // Instead, we can call a public endpoint or just show join gate with code only and fetch title via join attempt?
-          // Simpler: try to fetch room info without membership via a separate logic - we already have code, we'll try to get room via API that returns 404 if not exists, else show join gate
-          // For join gate we need title/language - we can try to get it from a 403 response? Our API doesn't return title on 403. So we need to fetch room existence separately.
-          // We'll attempt to call /api/rooms/[code]/join with GET? No, join is POST. So we need to handle: if 403, we still need room metadata.
-          // As fallback, we'll show join gate with placeholder and let join endpoint return title.
-          // Actually our join endpoint returns title even when not member, so we can call it with a HEAD? No.
-          // Let's try to get room metadata via a new approach: call GET /api/rooms/[code] and if 403, we still need title. We can make the server return title even on 403? But for now, we'll fetch via a direct DB? No.
-          // Simpler: show join gate with code, and let JoinGate itself fetch title on join. Or we can attempt to fetch room info via an unauthenticated endpoint - we don't have one. So we will attempt to join immediately? No.
-          // For now, set status to join and let JoinGate handle title fetching via its own API which returns title.
-          // We'll need to get title for JoinGate - we can try to call /api/rooms/[code]/join with GET? That doesn't exist. So we will set room to minimal and JoinGate will fetch.
-          // Actually we can set status to join and provide code, title empty, language empty - JoinGate will show with what we have.
-          // Better: attempt to fetch room existence via a public route - we don't have. So we will just show join gate.
-          if (!cancelled) {
-            setStatus("join");
-            // Try to get title via a trick: call join endpoint with POST but without joining? No.
-            // We'll set placeholder and let JoinGate's join return title, but JoinGate needs title before join.
-            // As temporary, set room with code and unknown title.
-            setRoom({ code, title: code, language: "markdown" });
-          }
-          return;
-        }
-        if (!roomRes.ok) throw new Error(`room ${roomRes.status}`);
-        const data = (await roomRes.json()) as {
-          room: { code: string; title: string; language: string; role: RoomRole };
-          you: ClientUser;
-          sessionToken?: string;
-        };
-        handleSessionResponse(data);
-        if (cancelled) return;
-        setRoom(data.room);
-        setYou(data.you);
-        setRole(data.room.role);
-        setStatus("editor");
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load room");
-          setStatus("not-found");
-        }
-      }
-    };
-
     void load();
+  }, [load, reloadKey]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [code]);
+  const handleJoined = useCallback(() => {
+    console.log("[ROOM_CLIENT] JOIN_SUCCESS callback → reloading");
+    setReloadKey((k) => k + 1);
+  }, []);
 
   if (status === "loading") {
     return (
@@ -132,6 +134,7 @@ export default function RoomClient({ code }: RoomClientProps) {
         code={room?.code ?? code}
         title={room?.title ?? code}
         language={room?.language ?? "markdown"}
+        onJoined={handleJoined}
       />
     );
   }
