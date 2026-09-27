@@ -12,7 +12,7 @@ import type {
   ServerEvent,
   TextOp,
 } from "@/lib/types";
-import { apiFetch, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
+import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 
 export type ConnectionStatus =
   | "connecting"
@@ -366,11 +366,8 @@ export function useCollaborativeDocument(roomCode: string) {
         console.log("[SSE] COOKIE_AVAILABLE", { available: diag.cookieAvailable });
         console.log("[SSE] MEMORY_TOKEN_AVAILABLE", { available: diag.memoryToken });
         console.log("[SSE] WINDOW_NAME_TOKEN_AVAILABLE", { available: diag.windowNameToken });
-        const res = await apiFetch("/api/session");
-        console.log("[SSE] SESSION_READY", { status: res.status });
-        if (!res.ok) throw new Error(`session: ${res.status}`);
-        const sessData = (await res.json()) as SessionResponse;
-        handleSessionResponse(sessData);
+        const sessData = (await ensureClientSession()) as SessionResponse;
+        console.log("[SSE] SESSION_READY", { id: sessData.user?.id?.slice(0, 8) });
       } catch {
         scheduleReconnect();
         return;
@@ -380,7 +377,6 @@ export function useCollaborativeDocument(roomCode: string) {
       const token = getStoredToken();
       console.log("[SSE] SSE_CONNECT", { mode: token ? "bearer-fetch" : "cookie-eventsource", hasToken: !!token });
       if (token) {
-        // Bearer fallback: use fetch streaming with Authorization header (zero-storage)
         await openFetchStream();
       } else {
         await openEventSource();

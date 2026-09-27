@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import EditorRoom from "@/components/editor/EditorRoom";
 import JoinGate from "@/components/room/JoinGate";
-import { apiFetch, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
+import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 import type { ClientUser, RoomRole } from "@/lib/types";
 import { Loader2 } from "lucide-react";
 
@@ -33,13 +33,9 @@ export default function RoomClient({ code }: RoomClientProps) {
 
     try {
       console.log("[ROOM_CLIENT] SESSION_BOOTSTRAP start");
-      const sessRes = await apiFetch("/api/session");
-      console.log("[ROOM_CLIENT] SESSION_FETCH", { status: sessRes.status });
-      if (!sessRes.ok) throw new Error("session failed");
-      const sessData = (await sessRes.json()) as { user: ClientUser; sessionToken?: string };
-      handleSessionResponse(sessData);
-      setYou(sessData.user);
+      const sessData = (await ensureClientSession()) as { user: ClientUser; sessionToken?: string };
       console.log("[ROOM_CLIENT] SESSION_READY", { userId: sessData.user.id.slice(0, 8) });
+      setYou(sessData.user);
 
       console.log("[ROOM_CLIENT] ROOM_FETCH start");
       const roomRes = await apiFetch(`/api/rooms/${encodeURIComponent(code)}`);

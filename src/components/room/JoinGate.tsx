@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Users } from "lucide-react";
 import { languageAccent } from "@/lib/types";
-import { apiFetch, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
+import { apiFetch, ensureClientSession, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 
 interface JoinGateProps {
   code: string;
@@ -24,11 +24,11 @@ export default function JoinGate({ code, title, language, onJoined }: JoinGatePr
     setJoining(true);
     setError(null);
 
-    const beforeToken = getStoredToken();
-    console.log("[JOIN] BEFORE_JOIN_TOKEN_PRESENT", { present: !!beforeToken });
-    console.log("[JOIN] JOIN_TOKEN_PRESENT", { present: !!beforeToken });
-
     try {
+      await ensureClientSession();
+      const beforeToken = getStoredToken();
+      console.log("[JOIN] BEFORE_JOIN_TOKEN_PRESENT", { present: !!beforeToken });
+      console.log("[JOIN] JOIN_TOKEN_PRESENT", { present: !!beforeToken });
       console.log("[JOIN] JOIN_REQUEST_START", { url: `/api/rooms/${code}/join` });
       const res = await apiFetch(`/api/rooms/${encodeURIComponent(code)}/join`, {
         method: "POST",

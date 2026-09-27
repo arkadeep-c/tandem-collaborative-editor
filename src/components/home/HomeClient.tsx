@@ -29,7 +29,7 @@ import {
   type ClientUser,
   type RoomSummary,
 } from "@/lib/types";
-import { apiFetch, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
+import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 
 const DEMO_ROOM_CODE = "TANDEM";
 
@@ -109,48 +109,25 @@ export default function HomeClient() {
       console.log("[HOME] SESSIONSTORAGE available", { available: diagBefore.sessionStorageAvailable, hasToken: diagBefore.sessionStorageToken });
 
       try {
-        const res = await apiFetch("/api/session");
-        console.log("[HOME] session response", { status: res.status, ok: res.ok });
-        if (!res.ok) {
-          const errText = await res.text().catch(() => "no body");
-          console.error("[HOME] session failed status", { status: res.status, body: errText.slice(0, 200) });
-          throw new Error(`session ${res.status}`);
-        }
-        const data = (await res.json()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
-        console.log("[HOME] session data", { id: data.user?.id?.slice(0, 8), name: data.user?.name, fresh: data.fresh, hasToken: !!data.sessionToken });
-        handleSessionResponse(data);
+        // Use singleton bootstrap — ensures only one GET /api/session, others await same promise
+        const data = (await ensureClientSession()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
+        console.log("[HOME] SESSION_READY", { id: data.user?.id?.slice(0, 8), name: data.user?.name, fresh: data.fresh });
         setUser(data.user);
         const diagAfter = getAuthDiagnostics();
-        if (data.sessionToken || diagAfter.memoryToken || diagAfter.windowNameToken) {
+        if (diagAfter.memoryToken || diagAfter.windowNameToken || diagAfter.sessionStorageToken) {
           console.log("[HOME] bearer fallback active - token stored in memory");
           setBearerFallback(true);
         } else {
-          console.log("[HOME] cookie auth active (no token returned)");
-          // Even if no token returned, check if we have memory token from previous
-          if (getStoredToken()) {
-            setBearerFallback(true);
-          }
+          console.log("[HOME] cookie auth active");
+          if (getStoredToken()) setBearerFallback(true);
         }
-        console.log("[HOME] SESSION_READY", { userId: data.user?.id?.slice(0, 8) });
 
-        // Second check to detect if session persists (cookie or memory bearer)
+        // Persistence check (optional) — should be same id now that bootstrap done
         try {
           const res2 = await apiFetch("/api/session");
           const data2 = (await res2.json()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
           console.log("[HOME] session persistence check", { id1: data.user?.id?.slice(0, 8), id2: data2.user?.id?.slice(0, 8), same: data.user?.id === data2.user?.id });
           handleSessionResponse(data2);
-          if (data.user?.id && data2.user?.id && data.user.id !== data2.user.id) {
-            console.warn("[HOME] session ids differ, but memory token should keep it - checking stored token");
-            const stored = getStoredToken();
-            console.log("[HOME] after id mismatch, stored token present", { present: !!stored });
-            if (stored) {
-              // Memory token exists, so session is actually persisting via bearer
-              setUser(data2.user);
-            } else {
-              console.warn("[HOME] no stored token after mismatch - will try to use second session");
-              setUser(data2.user);
-            }
-          }
         } catch (e) {
           console.warn("[HOME] second session check failed", e);
         }
@@ -159,12 +136,8 @@ export default function HomeClient() {
         const diag = getAuthDiagnostics();
         const hasToken = !!getStoredToken();
         console.log("[HOME] failure diagnostics", { ...diag, hasToken });
-        // Only show fatal error if we have no token at all and session request failed
         if (!hasToken) {
           setLoadError("Could not establish a session.");
-        } else {
-          console.log("[HOME] session request failed but memory token exists, continuing");
-          // Try to use existing token to load rooms
         }
       }
       console.log("[HOME] ROOMS_FETCH start");
