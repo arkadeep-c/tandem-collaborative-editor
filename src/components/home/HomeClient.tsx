@@ -120,11 +120,16 @@ export default function HomeClient() {
         console.log("[HOME] session data", { id: data.user?.id?.slice(0, 8), name: data.user?.name, fresh: data.fresh, hasToken: !!data.sessionToken });
         handleSessionResponse(data);
         setUser(data.user);
-        if (data.sessionToken) {
+        const diagAfter = getAuthDiagnostics();
+        if (data.sessionToken || diagAfter.memoryToken || diagAfter.windowNameToken) {
           console.log("[HOME] bearer fallback active - token stored in memory");
           setBearerFallback(true);
         } else {
           console.log("[HOME] cookie auth active (no token returned)");
+          // Even if no token returned, check if we have memory token from previous
+          if (getStoredToken()) {
+            setBearerFallback(true);
+          }
         }
         console.log("[HOME] SESSION_READY", { userId: data.user?.id?.slice(0, 8) });
 
