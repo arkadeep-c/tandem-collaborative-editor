@@ -16,12 +16,22 @@ import {
   Link2,
   Loader2,
   LogOut,
+  Play,
+  Square,
+  Download,
+  Settings,
+  Trash2,
+  FileJson,
+  Bug,
+  Terminal as TerminalIcon,
 } from "lucide-react";
 import clsx from "clsx";
 import CollaborativeMonaco from "@/components/editor/MonacoEditor";
 import PresenceBar from "@/components/editor/PresenceBar";
 import ProfileDialog from "@/components/editor/ProfileDialog";
 import MarkdownPreview from "@/components/editor/MarkdownPreview";
+import OutputPanel from "@/components/editor/OutputPanel";
+import ProblemsPanel from "@/components/editor/ProblemsPanel";
 import { useCollaborativeDocument } from "@/lib/useCollaborativeDocument";
 import {
   LANGUAGE_OPTIONS,
@@ -29,15 +39,12 @@ import {
   type ClientUser,
   type RoomRole,
 } from "@/lib/types";
-import { apiFetch } from "@/lib/apiFetch";
-
-/**
- * EditorRoom — the collaborative workspace for one room code.
- * Identity, role, and room record all arrive server-verified via props
- * and the stream's init snapshot.
- */
+import { apiFetch, ensureClientSession } from "@/lib/apiFetch";
+import type { ExecutionResult, ExecutionProblem } from "@/lib/execution/types";
+import { LANGUAGE_CONFIG } from "@/lib/execution/types";
 
 type ViewMode = "edit" | "split" | "preview";
+type BottomTab = "output" | "problems" | "input";
 
 interface EditorRoomProps {
   room: { code: string; title: string; language: string };
@@ -54,20 +61,33 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const [leaving, setLeaving] = useState(false);
   const [manualViewMode, setManualViewMode] = useState<ViewMode | null>(null);
   const [previewContent, setPreviewContent] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Execution state
+  const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [stdin, setStdin] = useState("");
+  const [bottomTab, setBottomTab] = useState<BottomTab>("output");
+  const [bottomOpen, setBottomOpen] = useState(false);
+  const [fontSize, setFontSize] = useState(14);
+  const [wordWrap, setWordWrap] = useState<"on" | "off">("on");
+  const [minimap, setMinimap] = useState(false);
+
+  const editorRef = useRef<any>(null);
+  const monacoRef = useRef<any>(null);
 
   const { state, setBridge, submitLocalOps, publishPresence, updateMeta } =
     useCollaborativeDocument(room.code);
 
   const isOwner = role === "owner";
-  // Derived (no mirrored state): latest server identity wins unless the
-  // profile dialog produced something newer this mount.
   const profile = profileOverride ?? state.you ?? you;
   const titleShown = state.title || room.title;
   const isMarkdown = state.language === "markdown";
   const viewMode =
     (isMarkdown ? manualViewMode : null) ?? (isMarkdown ? "split" : "edit");
 
-  /* Trailing-throttled mirror into the preview pane. */
+  const isExecutable = LANGUAGE_CONFIG[state.language as keyof typeof LANGUAGE_CONFIG]?.executable ?? false;
+
   const latestMirrorRef = useRef("");
   const mirrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleMirror = useCallback((value: string) => {
@@ -98,9 +118,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         setCopiedLink(true);
         setTimeout(() => setCopiedLink(false), 1600);
       }
-    } catch {
-      /* clipboard blocked — ignore */
-    }
+    } catch {}
   }, []);
 
   const leaveRoom = useCallback(async () => {
@@ -110,11 +128,147 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, {
         method: "POST",
       });
-    } catch {
-      /* leaving anyway */
-    }
+    } catch {}
     router.push("/");
   }, [leaving, room.code, router]);
+
+  const runCode = useCallback(async () => {
+    if (running) return;
+    const code = latestMirrorRef.current || "";
+    if (!code.trim()) return;
+
+    setRunning(true);
+    setBottomOpen(true);
+    setBottomTab("output");
+    setExecutionResult(null);
+
+    try {
+      await ensureClientSession();
+      const res = await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          language: state.language,
+          code,
+          stdin: stdin || undefined,
+        }),
+      });
+
+      const result = (await res.json()) as ExecutionResult & { error?: string };
+      
+      if (!res.ok && result.error) {
+        setExecutionResult({
+          status: "execution_error",
+          stdout: "",
+          stderr: result.error,
+          exitCode: null,
+          duration: 0,
+          problems: [],
+        });
+      } else {
+        setExecutionResult(result);
+        if (result.problems && result.problems.length > 0) {
+          setBottomTab("problems");
+          // Set Monaco markers
+          if (monacoRef.current && editorRef.current) {
+            const monaco = monacoRef.current;
+            const model = editorRef.current.getModel();
+            if (model) {
+              const markers = result.problems.map((p: ExecutionProblem) => ({
+                startLineNumber: p.line,
+                startColumn: p.column || 1,
+                endLineNumber: p.line,
+                endColumn: (p.column || 1) + 10,
+                message: p.message,
+                severity: p.severity === "error" ? monaco.MarkerSeverity.Error : p.severity === "warning" ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Info,
+              }));
+              monaco.editor.setModelMarkers(model, "tandem", markers);
+            }
+          }
+        } else {
+          // Clear markers on success
+          if (monacoRef.current && editorRef.current) {
+            const model = editorRef.current.getModel();
+            if (model) {
+              monacoRef.current.editor.setModelMarkers(model, "tandem", []);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setExecutionResult({
+        status: "execution_error",
+        stdout: "",
+        stderr: err instanceof Error ? err.message : "Failed to execute",
+        exitCode: null,
+        duration: 0,
+        problems: [],
+      });
+    } finally {
+      setRunning(false);
+    }
+  }, [running, room.code, state.language, stdin]);
+
+  const jumpToError = useCallback((line: number, column?: number) => {
+    if (editorRef.current) {
+      editorRef.current.revealLineInCenter(line);
+      editorRef.current.setPosition({ lineNumber: line, column: column || 1 });
+      editorRef.current.focus();
+    }
+  }, []);
+
+  const copyCode = useCallback(async () => {
+    const code = latestMirrorRef.current;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 1500);
+    } catch {}
+  }, []);
+
+  const downloadCode = useCallback(() => {
+    const code = latestMirrorRef.current;
+    const ext = LANGUAGE_CONFIG[state.language as keyof typeof LANGUAGE_CONFIG]?.extension || "txt";
+    const filename = `${titleShown.replace(/[^a-z0-9]/gi, "_") || "code"}.${ext}`;
+    const blob = new Blob([code], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [titleShown, state.language]);
+
+  const formatJson = useCallback(() => {
+    if (state.language !== "json") return;
+    try {
+      const code = latestMirrorRef.current;
+      const parsed = JSON.parse(code);
+      const formatted = JSON.stringify(parsed, null, 2);
+      if (editorRef.current) {
+        const model = editorRef.current.getModel();
+        if (model) {
+          editorRef.current.executeEdits("format", [
+            {
+              range: model.getFullModelRange(),
+              text: formatted,
+            },
+          ]);
+        }
+      }
+    } catch (e) {
+      setExecutionResult({
+        status: "runtime_error",
+        stdout: "",
+        stderr: e instanceof Error ? e.message : "Invalid JSON",
+        exitCode: 1,
+        duration: 0,
+        problems: [{ file: "data.json", line: 1, message: e instanceof Error ? e.message : "Invalid JSON", severity: "error" }],
+      });
+      setBottomOpen(true);
+      setBottomTab("problems");
+    }
+  }, [state.language]);
 
   const connected = state.connection === "connected";
   const dirty =
@@ -125,29 +279,23 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       ? `${window.location.origin}/room/${room.code}`
       : `/room/${room.code}`;
 
+  const problemsCount = executionResult?.problems?.length || 0;
+  const errorsCount = executionResult?.problems?.filter(p => p.severity === "error").length || 0;
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-[#07090f] text-slate-200">
-      {/* ------------------------------ header ------------------------------ */}
+      {/* Header */}
       <header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/[0.06] bg-[#0b0e14]/90 px-4 backdrop-blur">
         <button
           type="button"
           onClick={() => void leaveRoom()}
           className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-white/20 hover:text-slate-100"
           aria-label="Leave room"
-          title="Leave room"
         >
-          {leaving ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <ArrowLeft className="h-4 w-4" />
-          )}
+          {leaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowLeft className="h-4 w-4" />}
         </button>
 
-        {/* room code */}
-        <span
-          className="flex items-center gap-1.5 rounded-md border border-violet-400/30 bg-violet-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-violet-200"
-          title="Room code"
-        >
+        <span className="flex items-center gap-1.5 rounded-md border border-violet-400/30 bg-violet-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-violet-200">
           {room.code}
         </span>
 
@@ -167,69 +315,37 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               ? "border-transparent hover:border-white/10 focus:border-violet-400/50 focus:bg-[#0b0e14]"
               : "cursor-default border-transparent",
           )}
-          title={isOwner ? "Room title" : `Room title (owner: editable)`}
         />
 
-        <span
-          className="flex items-center gap-1.5 rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-medium"
-          title={`Stream status: ${state.connection}`}
-        >
-          <span
-            className={clsx(
-              "h-1.5 w-1.5 rounded-full",
-              connected
-                ? "animate-pulse bg-emerald-400"
-                : state.connection === "error"
-                  ? "bg-rose-400"
-                  : "animate-pulse bg-amber-400",
-            )}
-          />
+        <span className="flex items-center gap-1.5 rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-medium">
+          <span className={clsx("h-1.5 w-1.5 rounded-full", connected ? "animate-pulse bg-emerald-400" : state.connection === "error" ? "bg-rose-400" : "animate-pulse bg-amber-400")} />
           <span className="hidden text-slate-400 sm:inline">
-            {connected
-              ? "Live"
-              : state.connection === "error"
-                ? "Connection failed"
-                : "Reconnecting…"}
+            {connected ? "Live" : state.connection === "error" ? "Connection failed" : "Reconnecting…"}
           </span>
         </span>
 
         {isOwner && (
-          <span
-            className="hidden items-center gap-1 rounded-full border border-amber-300/30 bg-amber-300/10 px-2 py-1 text-[10px] font-semibold text-amber-200 md:flex"
-            title="You own this room"
-          >
+          <span className="hidden items-center gap-1 rounded-full border border-amber-300/30 bg-amber-300/10 px-2 py-1 text-[10px] font-semibold text-amber-200 md:flex">
             <Crown className="h-3 w-3" />
             Owner
           </span>
         )}
 
-        <div className="ml-auto flex items-center gap-3">
-          <PresenceBar
-            users={state.users}
-            selfSessionId={state.selfSessionId}
-            onEditProfile={() => setEditingProfile(true)}
-          />
+        <div className="ml-auto flex items-center gap-2">
+          <PresenceBar users={state.users} selfSessionId={state.selfSessionId} onEditProfile={() => setEditingProfile(true)} />
 
           <div className="hidden h-5 w-px bg-white/10 md:block" />
 
-          {/* language: owner switches, editors see the badge */}
           {isOwner ? (
             <div className="relative">
               <select
                 value={state.language}
-                onChange={(event) =>
-                  void updateMeta({ language: event.target.value })
-                }
+                onChange={(event) => void updateMeta({ language: event.target.value })}
                 className="cursor-pointer appearance-none rounded-lg border border-white/10 bg-[#11151f] py-1.5 pl-3 pr-7 text-xs font-medium outline-none transition hover:border-white/20 focus:border-violet-400/50"
                 style={{ color: languageAccent(state.language) }}
-                aria-label="Document language"
               >
                 {LANGUAGE_OPTIONS.map((option) => (
-                  <option
-                    key={option.id}
-                    value={option.id}
-                    className="bg-[#11151f] text-slate-200"
-                  >
+                  <option key={option.id} value={option.id} className="bg-[#11151f] text-slate-200">
                     {option.label}
                   </option>
                 ))}
@@ -239,36 +355,69 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           ) : (
             <span
               className="rounded-md px-2 py-1 font-mono text-[11px] font-semibold"
-              style={{
-                color: languageAccent(state.language),
-                backgroundColor: `${languageAccent(state.language)}14`,
-              }}
-              title="Only the room owner can change the language"
+              style={{ color: languageAccent(state.language), backgroundColor: `${languageAccent(state.language)}14` }}
             >
-              {LANGUAGE_OPTIONS.find((l) => l.id === state.language)?.label ??
-                state.language}
+              {LANGUAGE_OPTIONS.find((l) => l.id === state.language)?.label ?? state.language}
             </span>
           )}
 
+          <div className="flex items-center gap-1">
+            {isExecutable && (
+              <button
+                onClick={() => void runCode()}
+                disabled={running}
+                className="flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-50"
+                title="Run code (Ctrl+Enter)"
+              >
+                {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                Run
+              </button>
+            )}
+            {state.language === "json" && (
+              <button
+                onClick={formatJson}
+                className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10"
+                title="Format JSON"
+              >
+                <FileJson className="h-3.5 w-3.5" />
+                Format
+              </button>
+            )}
+            <button
+              onClick={() => void copyCode()}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200"
+              title="Copy code"
+            >
+              {copiedCode ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+            </button>
+            <button
+              onClick={downloadCode}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200"
+              title="Download code"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setShowSettings(!showSettings)}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200"
+              title="Editor settings"
+            >
+              <Settings className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
           {isMarkdown && (
             <div className="hidden items-center rounded-lg border border-white/10 bg-[#11151f] p-0.5 md:flex">
-              {(
-                [
-                  { id: "edit", icon: Code2, label: "Editor" },
-                  { id: "split", icon: Columns2, label: "Split" },
-                  { id: "preview", icon: Eye, label: "Preview" },
-                ] as const
-              ).map(({ id, icon: Icon, label }) => (
+              {[
+                { id: "edit", icon: Code2, label: "Editor" },
+                { id: "split", icon: Columns2, label: "Split" },
+                { id: "preview", icon: Eye, label: "Preview" },
+              ].map(({ id, icon: Icon, label }) => (
                 <button
                   key={id}
                   type="button"
-                  onClick={() => setManualViewMode(id)}
-                  className={clsx(
-                    "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition",
-                    viewMode === id
-                      ? "bg-violet-500/20 text-violet-200"
-                      : "text-slate-400 hover:text-slate-200",
-                  )}
+                  onClick={() => setManualViewMode(id as ViewMode)}
+                  className={clsx("flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition", viewMode === id ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200")}
                 >
                   <Icon className="h-3.5 w-3.5" />
                   <span className="hidden lg:inline">{label}</span>
@@ -277,41 +426,24 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             </div>
           )}
 
-          {/* share */}
           <div className="hidden items-center gap-1.5 sm:flex">
             <button
-              type="button"
               onClick={() => void copyValue(room.code, "code")}
               className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-white/25"
-              title={`Copy room code: ${room.code}`}
             >
-              {copiedCode ? (
-                <Check className="h-3.5 w-3.5 text-emerald-400" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
+              {copiedCode ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
               <span className="hidden lg:inline">Code</span>
             </button>
             <button
-              type="button"
               onClick={() => void copyValue(inviteLink, "link")}
-              className="flex items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-400 active:scale-[0.97]"
-              title={`Copy invite link: ${inviteLink}`}
+              className="flex items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-400"
             >
-              {copiedLink ? (
-                <Check className="h-3.5 w-3.5" />
-              ) : (
-                <Link2 className="h-3.5 w-3.5" />
-              )}
-              <span className="hidden lg:inline">
-                {copiedLink ? "Copied" : "Share"}
-              </span>
+              {copiedLink ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
+              <span className="hidden lg:inline">{copiedLink ? "Copied" : "Share"}</span>
             </button>
             <button
-              type="button"
               onClick={() => void leaveRoom()}
               className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-rose-400/40 hover:text-rose-300"
-              title="Leave room"
             >
               <LogOut className="h-3.5 w-3.5" />
             </button>
@@ -319,84 +451,148 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         </div>
       </header>
 
-      {/* ------------------------------ workspace ------------------------------ */}
-      <main className="flex min-h-0 flex-1">
-        {(viewMode !== "preview" || !isMarkdown) && (
-          <div
-            className={clsx(
-              "min-w-0",
-              isMarkdown && viewMode === "split" ? "w-1/2" : "w-full",
-            )}
-          >
-            {connected || state.revision > 0 ? (
-              <CollaborativeMonaco
-                language={state.language}
-                users={state.users}
-                selfSessionId={state.selfSessionId}
-                setBridge={setBridge}
-                submitLocalOps={submitLocalOps}
-                publishPresence={publishPresence}
-                onMirror={isMarkdown ? handleMirror : undefined}
-              />
-            ) : (
-              <div className="flex h-full items-center justify-center bg-[#0b0e14]">
-                <div className="flex items-center gap-3 text-sm text-slate-500">
-                  <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
-                  {state.connection === "error"
-                    ? "Could not connect — check your membership, then refresh."
-                    : "Joining room…"}
-                </div>
-              </div>
-            )}
+      {showSettings && (
+        <div className="border-b border-white/[0.06] bg-[#0f131d] px-4 py-3">
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            <label className="flex items-center gap-2">
+              <span className="text-slate-400">Font size</span>
+              <input type="range" min="12" max="24" value={fontSize} onChange={(e) => setFontSize(parseInt(e.target.value))} className="w-20" />
+              <span className="text-slate-300">{fontSize}px</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <span className="text-slate-400">Word wrap</span>
+              <select value={wordWrap} onChange={(e) => setWordWrap(e.target.value as any)} className="rounded border border-white/10 bg-[#11151f] px-2 py-1">
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={minimap} onChange={(e) => setMinimap(e.target.checked)} />
+              <span className="text-slate-400">Minimap</span>
+            </label>
           </div>
-        )}
-        {isMarkdown && viewMode !== "edit" && (
-          <div
-            className={clsx(
-              "min-w-0 border-l border-white/[0.06] bg-[#0a0d13]",
-              viewMode === "split" ? "w-1/2" : "w-full",
-            )}
-          >
-            <MarkdownPreview markdown={previewContent} />
+        </div>
+      )}
+
+      {/* Workspace */}
+      <main className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1">
+          {(viewMode !== "preview" || !isMarkdown) && (
+            <div className={clsx("min-w-0", isMarkdown && viewMode === "split" ? "w-1/2" : "w-full")}>
+              {connected || state.revision > 0 ? (
+                <CollaborativeMonaco
+                  language={state.language}
+                  users={state.users}
+                  selfSessionId={state.selfSessionId}
+                  setBridge={(bridge) => {
+                    setBridge(bridge);
+                    if (bridge) {
+                      // Capture editor instance for settings and jump-to-error
+                      const getEditor = () => (bridge as any).editor || (bridge as any)._editor;
+                      // We'll get editor via ref callback in MonacoEditor
+                    }
+                  }}
+                  submitLocalOps={submitLocalOps}
+                  publishPresence={publishPresence}
+                  onMirror={handleMirror}
+                  fontSize={fontSize}
+                  wordWrap={wordWrap}
+                  minimap={minimap}
+                  onEditorMount={(editor, monaco) => {
+                    editorRef.current = editor;
+                    monacoRef.current = monaco;
+                  }}
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center bg-[#0b0e14]">
+                  <div className="flex items-center gap-3 text-sm text-slate-500">
+                    <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
+                    {state.connection === "error" ? "Could not connect — check membership, then refresh." : "Joining room…"}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {isMarkdown && viewMode !== "edit" && (
+            <div className={clsx("min-w-0 border-l border-white/[0.06] bg-[#0a0d13]", viewMode === "split" ? "w-1/2" : "w-full")}>
+              <MarkdownPreview markdown={previewContent} />
+            </div>
+          )}
+        </div>
+
+        {/* Bottom panels */}
+        {bottomOpen && (
+          <div className="flex h-64 shrink-0 flex-col border-t border-white/[0.06] bg-[#0a0d13]">
+            <div className="flex items-center gap-1 border-b border-white/[0.06] px-2">
+              <button
+                onClick={() => setBottomTab("output")}
+                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "output" ? "border-b-2 border-violet-400 text-violet-200" : "text-slate-500 hover:text-slate-300")}
+              >
+                <TerminalIcon className="h-3.5 w-3.5" />
+                Output
+              </button>
+              <button
+                onClick={() => setBottomTab("problems")}
+                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "problems" ? "border-b-2 border-violet-400 text-violet-200" : "text-slate-500 hover:text-slate-300")}
+              >
+                <Bug className="h-3.5 w-3.5" />
+                Problems {problemsCount > 0 && <span className={clsx("rounded px-1.5 text-[10px]", errorsCount > 0 ? "bg-rose-400/20 text-rose-300" : "bg-white/10 text-slate-400")}>{problemsCount}</span>}
+              </button>
+              <button
+                onClick={() => setBottomTab("input")}
+                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "input" ? "border-b-2 border-violet-400 text-violet-200" : "text-slate-500 hover:text-slate-300")}
+              >
+                <TerminalIcon className="h-3.5 w-3.5" />
+                Input
+              </button>
+              <div className="ml-auto flex items-center gap-1">
+                <button onClick={() => setBottomOpen(false)} className="rounded p-1 text-slate-500 hover:bg-white/10 hover:text-slate-300">
+                  <span className="text-xs">Close</span>
+                </button>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1">
+              {bottomTab === "output" && <OutputPanel result={executionResult} running={running} onClear={() => setExecutionResult(null)} />}
+              {bottomTab === "problems" && <ProblemsPanel problems={executionResult?.problems || []} onJumpTo={jumpToError} />}
+              {bottomTab === "input" && (
+                <div className="flex h-full flex-col p-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Stdin (input for program)</div>
+                  <textarea
+                    value={stdin}
+                    onChange={(e) => setStdin(e.target.value)}
+                    placeholder="Enter input for your program, e.g.&#10;5&#10;10&#10;20"
+                    className="flex-1 resize-none rounded border border-white/10 bg-[#0b0e14] p-3 font-mono text-xs text-slate-200 outline-none focus:border-violet-400/50"
+                  />
+                  <div className="mt-2 text-[10px] text-slate-600">Max 10KB, will be fed to program's stdin</div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </main>
 
-      {/* ------------------------------ status bar ------------------------------ */}
+      {/* Status bar */}
       <footer className="flex h-8 shrink-0 items-center gap-4 border-t border-white/[0.06] bg-[#0b0e14] px-4 text-[11px] text-slate-500">
-        <span
-          className={clsx(
-            "flex items-center gap-1.5 font-medium",
-            dirty ? "text-amber-300/90" : "text-emerald-300/90",
-          )}
-        >
-          {dirty ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : (
-            <Check className="h-3 w-3" />
-          )}
+        <span className={clsx("flex items-center gap-1.5 font-medium", dirty ? "text-amber-300/90" : "text-emerald-300/90")}>
+          {dirty ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
           {dirty ? "Syncing…" : "Saved"}
         </span>
-
         <span className="flex items-center gap-1.5">
           <HardDrive className="h-3 w-3" />
           rev {state.revision}
         </span>
-
         <span className="hidden items-center gap-1.5 sm:flex">
           <Database className="h-3 w-3" />
-          cache:{" "}
-          {state.cacheMode === "redis"
-            ? "Redis"
-            : state.cacheMode === "memory"
-              ? "in-memory"
-              : "—"}
+          cache: {state.cacheMode === "redis" ? "Redis" : state.cacheMode === "memory" ? "in-memory" : "—"}
         </span>
-
+        {!bottomOpen && (
+          <button onClick={() => setBottomOpen(true)} className="flex items-center gap-1 rounded bg-white/10 px-2 py-0.5 text-slate-400 hover:bg-white/20 hover:text-slate-200">
+            <TerminalIcon className="h-3 w-3" />
+            {isExecutable ? "Run" : "Output"} {problemsCount > 0 && `(${problemsCount})`}
+          </button>
+        )}
         <span className="ml-auto hidden md:block">
-          room <span className="font-mono text-slate-400">{room.code}</span>
-          {" · "}
-          <span className="text-slate-400">{profile.name}</span>
+          room <span className="font-mono text-slate-400">{room.code}</span> · <span className="text-slate-400">{profile.name}</span>
         </span>
         <span className="hidden lg:block">OT-lite · single-order engine</span>
       </footer>

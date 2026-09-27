@@ -31,6 +31,10 @@ interface MonacoEditorProps {
   publishPresence: (patch: PresencePatch) => void;
   /** Debounced/trailing full-content mirror (drives the markdown preview). */
   onMirror?: (content: string) => void;
+  fontSize?: number;
+  wordWrap?: "on" | "off";
+  minimap?: boolean;
+  onEditorMount?: (editor: IStandaloneCodeEditor, monaco: any) => void;
 }
 
 const PRESENCE_THROTTLE_MS = 90;
@@ -48,6 +52,10 @@ export default function MonacoEditor({
   submitLocalOps,
   publishPresence,
   onMirror,
+  fontSize = 14,
+  wordWrap,
+  minimap = true,
+  onEditorMount,
 }: MonacoEditorProps) {
   const editorRef = useRef<IStandaloneCodeEditor | null>(null);
   const applyingRemoteRef = useRef(false);
@@ -140,9 +148,10 @@ export default function MonacoEditor({
   }, []);
 
   const handleMount: OnMount = useCallback(
-    (ed) => {
+    (ed, monaco) => {
       editorRef.current = ed;
       decorationsRef.current = ed.createDecorationsCollection([]);
+      onEditorMount?.(ed, monaco);
 
       ed.onDidChangeModelContent((event) => {
         if (applyingRemoteRef.current) return;
@@ -178,9 +187,14 @@ export default function MonacoEditor({
       ed.onDidChangeModelContent(() => {
         onMirrorRef.current?.(ed.getModel()?.getValue() ?? "");
       });
+      // Keyboard shortcut Ctrl+Enter to run code
+      ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+        const event = new CustomEvent("tandem-run-code");
+        window.dispatchEvent(event);
+      });
       ed.focus();
     },
-    [schedulePresencePush],
+    [schedulePresencePush, onEditorMount],
   );
 
   /* ---------------------------------------------------------------- */
@@ -350,8 +364,12 @@ export default function MonacoEditor({
     if (monaco) {
       monaco.editor.setModelLanguage(model, monacoLanguageFor(language));
     }
-    ed.updateOptions({ wordWrap: language === "markdown" ? "on" : "off" });
-  }, [language]);
+    ed.updateOptions({ 
+      wordWrap: wordWrap ?? (language === "markdown" ? "on" : "off"),
+      fontSize,
+      minimap: { enabled: minimap },
+    });
+  }, [language, wordWrap, fontSize, minimap]);
 
   return (
     <Editor
@@ -371,18 +389,18 @@ export default function MonacoEditor({
       options={{
         automaticLayout: true,
         fontFamily: "var(--font-jetbrains), ui-monospace, SFMono-Regular, monospace",
-        fontSize: 14,
+        fontSize,
         fontLigatures: true,
         lineHeight: 1.65,
         padding: { top: 18, bottom: 18 },
         smoothScrolling: true,
         cursorSmoothCaretAnimation: "on",
         cursorBlinking: "smooth",
-        minimap: { enabled: true, scale: 1, showSlider: "mouseover" },
+        minimap: { enabled: minimap, scale: 1, showSlider: "mouseover" },
         scrollBeyondLastLine: false,
         renderLineHighlight: "all",
         bracketPairColorization: { enabled: true },
-        wordWrap: language === "markdown" ? "on" : "off",
+        wordWrap: wordWrap ?? (language === "markdown" ? "on" : "off"),
         tabSize: 2,
         insertSpaces: true,
         contextmenu: true,

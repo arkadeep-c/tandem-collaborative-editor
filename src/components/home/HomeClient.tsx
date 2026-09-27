@@ -30,6 +30,7 @@ import {
   type RoomSummary,
 } from "@/lib/types";
 import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
+import { showToast } from "@/components/ui/Toast";
 
 const DEMO_ROOM_CODE = "TANDEM";
 
@@ -426,45 +427,100 @@ export default function HomeClient() {
                     delay: 0.05 * Math.min(index, 8),
                     ease: [0.22, 1, 0.36, 1],
                   }}
+                  className="group relative overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0c101a]/80 p-5 transition duration-300 hover:-translate-y-1 hover:border-violet-400/40 hover:bg-[#0e1320] hover:shadow-2xl hover:shadow-violet-950/40"
                 >
-                  <Link
-                    href={`/room/${room.code}`}
-                    className="group relative block overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0c101a]/80 p-5 transition duration-300 hover:-translate-y-1 hover:border-violet-400/40 hover:bg-[#0e1320] hover:shadow-2xl hover:shadow-violet-950/40"
-                  >
-                    <div
-                      className="absolute inset-x-0 top-0 h-px opacity-60"
-                      style={{
-                        background: `linear-gradient(90deg, transparent, ${languageAccent(room.language)}, transparent)`,
-                      }}
-                    />
-                    <div className="mb-7 flex items-start justify-between">
-                      <span className="rounded-md border border-violet-400/30 bg-violet-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-violet-200">
-                        {room.code}
-                      </span>
-                      <span className="flex items-center gap-2">
-                        {room.role === "owner" && (
-                          <Crown className="h-3.5 w-3.5 text-amber-300" />
-                        )}
-                        {room.activeUsers > 0 && (
-                          <span className="flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
-                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-                            {room.activeUsers} live
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    <h3 className="truncate text-[15px] font-semibold text-slate-100">
+                  <div
+                    className="absolute inset-x-0 top-0 h-px opacity-60"
+                    style={{
+                      background: `linear-gradient(90deg, transparent, ${languageAccent(room.language)}, transparent)`,
+                    }}
+                  />
+                  <div className="mb-4 flex items-start justify-between">
+                    <Link href={`/room/${room.code}`} className="rounded-md border border-violet-400/30 bg-violet-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-violet-200 hover:bg-violet-400/20">
+                      {room.code}
+                    </Link>
+                    <span className="flex items-center gap-2">
+                      {room.role === "owner" && <Crown className="h-3.5 w-3.5 text-amber-300" />}
+                      {room.activeUsers > 0 && (
+                        <span className="flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                          {room.activeUsers} live
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                  <Link href={`/room/${room.code}`} className="block">
+                    <h3 className="truncate text-[15px] font-semibold text-slate-100 group-hover:text-violet-200">
                       {room.title}
                     </h3>
-                    <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-                      <span className="font-mono">
-                        {room.language} · {room.memberCount} member
-                        {room.memberCount === 1 ? "" : "s"} ·{" "}
-                        {relativeTime(room.updatedAt)}
-                      </span>
-                      <ArrowUpRight className="h-4 w-4 text-slate-600 transition group-hover:translate-x-0.5 group-hover:text-violet-300" />
+                    <div className="mt-1 text-xs text-slate-500 font-mono">
+                      {room.language} · {room.memberCount} member{room.memberCount === 1 ? "" : "s"} · {relativeTime(room.updatedAt)}
                     </div>
                   </Link>
+                  <div className="mt-4 flex flex-wrap gap-1.5">
+                    <button
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(room.code);
+                          showToast(`Copied code ${room.code}`, "success");
+                        } catch {}
+                      }}
+                      className="rounded-md border border-white/10 px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-white/10 hover:text-slate-200"
+                    >
+                      Copy Code
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const link = `${window.location.origin}/room/${room.code}`;
+                        try {
+                          await navigator.clipboard.writeText(link);
+                          showToast("Invite link copied", "success");
+                        } catch {}
+                      }}
+                      className="rounded-md border border-white/10 px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-white/10 hover:text-slate-200"
+                    >
+                      Copy Link
+                    </button>
+                    <Link href={`/room/${room.code}`} className="rounded-md bg-violet-500 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-violet-400">
+                      Open
+                    </Link>
+                    <button
+                      onClick={async () => {
+                        if (!confirm(`Leave room ${room.code}?`)) return;
+                        try {
+                          await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, { method: "POST" });
+                          showToast(`Left room ${room.code}`, "success");
+                          void refresh();
+                        } catch {
+                          showToast("Failed to leave room", "error");
+                        }
+                      }}
+                      className="rounded-md border border-white/10 px-2 py-1 text-[10px] text-slate-500 hover:border-rose-400/30 hover:text-rose-300"
+                    >
+                      Leave
+                    </button>
+                    {room.role === "owner" && (
+                      <button
+                        onClick={async () => {
+                          if (!confirm(`Delete "${room.title}"?\n\nThis will permanently remove the room and its document.`)) return;
+                          try {
+                            const res = await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/delete`, { method: "DELETE" });
+                            if (!res.ok) {
+                              const err = await res.json().catch(() => ({}));
+                              throw new Error((err as any).error || "Failed");
+                            }
+                            showToast(`Deleted room ${room.code}`, "success");
+                            void refresh();
+                          } catch (e) {
+                            showToast(e instanceof Error ? e.message : "Failed to delete", "error");
+                          }
+                        }}
+                        className="rounded-md border border-rose-400/20 bg-rose-400/10 px-2 py-1 text-[10px] font-medium text-rose-300 hover:bg-rose-400/20"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
                 </motion.div>
               ))}
             </div>

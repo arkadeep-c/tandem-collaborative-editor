@@ -1,11 +1,7 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
-
-// Local/system font fallback — avoids Google Fonts network fetch that breaks
-// `next build` in offline / sandboxed environments (Arena preview).
-// Original design used Space Grotesk + JetBrains Mono; we keep the same
-// aesthetic via system font stacks defined in globals.css.
+import ToastContainer from "@/components/ui/Toast";
 
 export const metadata: Metadata = {
   title: "Tandem — Real-time Collaborative Code & Markdown Editor",
@@ -18,6 +14,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html lang="en">
       <body className="bg-[#07090f] font-sans text-slate-200 antialiased">
         {children}
+        <ToastContainer />
       </body>
     </html>
   );
