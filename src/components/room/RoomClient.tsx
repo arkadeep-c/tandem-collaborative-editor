@@ -33,7 +33,11 @@ export default function RoomClient({ code }: RoomClientProps) {
 
     try {
       console.log("[ROOM_CLIENT] SESSION_BOOTSTRAP start");
-      const sessData = (await ensureClientSession()) as { user: ClientUser; sessionToken?: string };
+      const sessData = (await ensureClientSession()) as { user: ClientUser; sessionToken?: string } | null | undefined;
+      if (!sessData || !sessData.user || !sessData.user.id) {
+        console.error("[ROOM_CLIENT] SESSION_BOOTSTRAP returned invalid data", { sessData });
+        throw new Error("Could not establish a session. Please refresh the page.");
+      }
       console.log("[ROOM_CLIENT] SESSION_READY", { userId: sessData.user.id.slice(0, 8) });
       setYou(sessData.user);
 

@@ -366,7 +366,11 @@ export function useCollaborativeDocument(roomCode: string) {
         console.log("[SSE] COOKIE_AVAILABLE", { available: diag.cookieAvailable });
         console.log("[SSE] MEMORY_TOKEN_AVAILABLE", { available: diag.memoryToken });
         console.log("[SSE] WINDOW_NAME_TOKEN_AVAILABLE", { available: diag.windowNameToken });
-        const sessData = (await ensureClientSession()) as SessionResponse;
+        const sessData = (await ensureClientSession()) as SessionResponse | null | undefined;
+        if (!sessData || !sessData.user) {
+          console.error("[SSE] SESSION_BOOTSTRAP invalid data", { sessData });
+          throw new Error("Invalid session");
+        }
         console.log("[SSE] SESSION_READY", { id: sessData.user?.id?.slice(0, 8) });
       } catch {
         scheduleReconnect();

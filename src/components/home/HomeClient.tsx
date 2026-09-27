@@ -110,7 +110,11 @@ export default function HomeClient() {
 
       try {
         // Use singleton bootstrap — ensures only one GET /api/session, others await same promise
-        const data = (await ensureClientSession()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
+        const data = (await ensureClientSession()) as { user: ClientUser; fresh?: boolean; sessionToken?: string } | null | undefined;
+        if (!data || !data.user || !data.user.id) {
+          console.error("[HOME] SESSION_BOOTSTRAP returned invalid data", { data });
+          throw new Error("Could not establish a session.");
+        }
         console.log("[HOME] SESSION_READY", { id: data.user?.id?.slice(0, 8), name: data.user?.name, fresh: data.fresh });
         setUser(data.user);
         const diagAfter = getAuthDiagnostics();

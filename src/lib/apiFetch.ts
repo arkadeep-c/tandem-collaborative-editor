@@ -167,12 +167,15 @@ if (isBrowser()) {
 
 let sessionBootstrapPromise: Promise<any> | null = null;
 let sessionBootstrapDone = false;
+let lastSessionData: any = null;
 
 export async function ensureClientSession(): Promise<any> {
-  if (sessionBootstrapDone && getStoredToken()) {
-    return;
+  if (sessionBootstrapDone && lastSessionData && getStoredToken()) {
+    console.log("[SESSION] SESSION_BOOTSTRAP_CACHE_HIT", { id: lastSessionData.user?.id?.slice(0, 8) });
+    return lastSessionData;
   }
   if (sessionBootstrapPromise) {
+    console.log("[SESSION] SESSION_BOOTSTRAP_AWAIT_EXISTING");
     return sessionBootstrapPromise;
   }
 
@@ -192,15 +195,21 @@ export async function ensureClientSession(): Promise<any> {
         throw new Error(`session ${res.status}`);
       }
       const data = await res.json();
+      if (!data || !data.user) {
+        console.error("[SESSION] bootstrap invalid response", { data });
+        throw new Error("Invalid session response: missing user");
+      }
       console.log("[SESSION] SESSION_BOOTSTRAP_COMPLETE", { hasToken: !!data.sessionToken, fresh: data.fresh, id: data.user?.id?.slice(0, 8) });
       handleSessionResponse(data);
       console.log("[SESSION] SESSION_TOKEN_READY", { present: !!getStoredToken() });
+      lastSessionData = data;
       sessionBootstrapDone = true;
       return data;
     } catch (e) {
       console.error("[SESSION] SESSION_BOOTSTRAP_ERROR", e);
       sessionBootstrapPromise = null;
       sessionBootstrapDone = false;
+      lastSessionData = null;
       throw e;
     }
   })();
@@ -211,6 +220,7 @@ export async function ensureClientSession(): Promise<any> {
 export function resetSessionBootstrap(): void {
   sessionBootstrapPromise = null;
   sessionBootstrapDone = false;
+  lastSessionData = null;
 }
 
 // --- apiFetch with bootstrap wait ---
