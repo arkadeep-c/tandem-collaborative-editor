@@ -1,6 +1,6 @@
 import { randomBytes } from "crypto";
 import { eq } from "drizzle-orm";
-import { db } from "@/db";
+import { db, isUsingLocalDb } from "@/db";
 import { documents, rooms } from "@/db/schema";
 import { currentStore, resolveDocStore } from "@/lib/collab/store";
 import { applyOp, transformOp } from "@/lib/ot";
@@ -242,18 +242,28 @@ class Room {
     await this.enqueue(async () => {
       if (patch.title !== undefined) this.meta.title = patch.title;
       if (patch.language !== undefined) this.meta.language = patch.language;
-      await db
-        .update(documents)
-        .set({
-          ...(patch.title !== undefined ? { title: patch.title } : {}),
-          ...(patch.language !== undefined ? { language: patch.language } : {}),
-          updatedAt: new Date(),
-        })
-        .where(eq(documents.id, this.record.documentId));
-      await db
-        .update(rooms)
-        .set({ updatedAt: new Date() })
-        .where(eq(rooms.id, this.record.id));
+      if (isUsingLocalDb()) {
+        (db as any)
+          .update(documents)
+          .set({
+            ...(patch.title !== undefined ? { title: patch.title } : {}),
+            ...(patch.language !== undefined ? { language: patch.language } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(documents.id, this.record.documentId))
+          .run();
+        (db as any).update(rooms).set({ updatedAt: new Date() }).where(eq(rooms.id, this.record.id)).run();
+      } else {
+        await (db as any)
+          .update(documents)
+          .set({
+            ...(patch.title !== undefined ? { title: patch.title } : {}),
+            ...(patch.language !== undefined ? { language: patch.language } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(documents.id, this.record.documentId));
+        await (db as any).update(rooms).set({ updatedAt: new Date() }).where(eq(rooms.id, this.record.id));
+      }
     });
     this.broadcast({ type: "meta", ...patch });
   }
@@ -276,14 +286,26 @@ class Room {
     try {
       const store = await resolveDocStore();
       await store.set(this.record.code, snapshot);
-      await db
-        .update(documents)
-        .set({
-          content: snapshot.content,
-          revision: snapshot.revision,
-          updatedAt: new Date(),
-        })
-        .where(eq(documents.id, this.record.documentId));
+      if (isUsingLocalDb()) {
+        (db as any)
+          .update(documents)
+          .set({
+            content: snapshot.content,
+            revision: snapshot.revision,
+            updatedAt: new Date(),
+          })
+          .where(eq(documents.id, this.record.documentId))
+          .run();
+      } else {
+        await (db as any)
+          .update(documents)
+          .set({
+            content: snapshot.content,
+            revision: snapshot.revision,
+            updatedAt: new Date(),
+          })
+          .where(eq(documents.id, this.record.documentId));
+      }
       this.broadcast({
         type: "saved",
         revision: snapshot.revision,

@@ -17,9 +17,7 @@ Java · Markdown · JSON (plus Go, Rust, SQL, HTML, CSS, YAML).
 - **Share by code or link** — `https://<host>/room/<CODE>`; invitees get a
   join-confirmation gate, then land directly in the editor.
 - **Server-managed anonymous identity** — no accounts. The server creates
-  the user, signs an HMAC session cookie (`HttpOnly`, `SameSite=Lax`,
-  `Secure` in production), and every privileged request derives identity
-  from it. Display name/colors are cosmetic and server-validated.
+  the user, signs an HMAC session cookie (`HttpOnly`, `Secure`, `SameSite=None`, `Partitioned` in HTTPS preview/production; `Lax` in local dev), and every privileged request derives identity from it. Display name/colors are cosmetic and server-validated.
 - **Membership authorization** — edits, presence, streams, and metadata
   all re-verify *valid session → room exists → caller is a member*
   (owner role additionally required for title/language).
@@ -117,7 +115,7 @@ deliberately out of scope and documented under *Future improvements*.
 | Threat | Mitigation |
 | --- | --- |
 | Identity spoofing | Identity never comes from the client; server issues user + signed cookie; HMAC verified on every request |
-| Cookie theft/XSS read | `HttpOnly`, `SameSite=Lax`, `Secure` in production, 30-day sliding expiry, revocable session rows |
+| Cookie theft/XSS read | `HttpOnly`, `Secure` + `SameSite=None` + `Partitioned` in HTTPS preview/production (Lax in local dev), 30-day sliding expiry, revocable session rows |
 | Unauthorized room access | Membership row verified before stream/edits/presence/meta, server-side, on every request |
 | Connection hijack | Connection ids are server-minted (`c_<18 hex>`) and must map to the caller's user in the live room registry |
 | Owner escalation | Owner role comes from the DB membership row only; `PATCH` meta is owner-gated server-side |
@@ -125,38 +123,84 @@ deliberately out of scope and documented under *Future improvements*.
 | Stale/forged revisions | Base revisions outside the OT window (or above the tip) → `409` + snapshot resync |
 | Abuse | Sliding-window rate limits (room creation, joins, edits, presence, meta) |
 | Injection | Parameterized Drizzle queries; markdown preview rendered by react-markdown (no `dangerouslySetInnerHTML`) |
-| Secret handling | `SESSION_SECRET`/`DATABASE_URL`/`REDIS_URL` from env only (`.env` gitignored); no hardcoded secrets — missing secret falls back to an ephemeral per-process key with a loud warning |
+| Secret handling | `SESSION_SECRET`/`DATABASE_URL`/`REDIS_URL` from env only (`.env` gitignored); production/preview requires SESSION_SECRET via platform secrets — no ephemeral fallback; local dev may use ephemeral with warning |
 | Error hygiene | Short user-facing messages; stack traces stay in server logs |
+| Embedded cookie blocking | `Secure; SameSite=None; Partitioned` for HTTPS preview; graceful fallback banner with "Open in new tab" if browser still blocks |
 
-## 7 · Revision & ordering model
+## 7 · Session cookie & preview compatibility
 
-- Every op batch carries a `baseRevision`; the room transforms it over the
-  retained history ring (256 ops) and applies in one serialized order.
-- Revisions are monotonic per room and persisted with the buffer, so a
-  cold server restart still validates stale clients.
-- The author's **echo frame on the ordered stream** is the client FSM's
-  ack — outstanding batches can't deadlock, even when a batch is swallowed
-  whole by a concurrent wider delete.
-- Clients outside the transform window resync from a snapshot; reconnects
-  replay `init` (full buffer + roster) — refreshes are fully recoverable.
+The preview environment is HTTPS and embedded in a cross-site iframe. The proxy strips `sec-fetch-site` and `x-forwarded-proto`, so cookie attributes are **explicitly configured via environment**, not inferred from headers.
+
+- **Local HTTP development** (`http://localhost:3000`):
+  ```
+  SESSION_COOKIE_SECURE=false
+  SESSION_COOKIE_SAMESITE=lax
+  SESSION_COOKIE_PARTITIONED=false
+  ```
+- **HTTPS preview/production** (e.g. `https://*.e2b.app` embedded):
+  ```
+  SESSION_COOKIE_SECURE=true
+  SESSION_COOKIE_SAMESITE=none
+  SESSION_COOKIE_PARTITIONED=true
+  ```
+
+Target Set-Cookie in preview/production:
+```
+Set-Cookie: tandem_session=<value>; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=None; Partitioned
+```
+
+Defaults:
+- `NODE_ENV=production` → Secure=true, SameSite=None, Partitioned=true
+- `NODE_ENV=development` → Secure=false, SameSite=Lax, Partitioned=false
+
+Overrides via `SESSION_COOKIE_SECURE`, `SESSION_COOKIE_SAMESITE`, `SESSION_COOKIE_PARTITIONED` env vars.
+
+Frontend fetches use `credentials: "include"` and `EventSource` uses `withCredentials: true` to preserve cookies. If the browser still blocks third-party partitioned cookies, the UI shows:
+> "Your browser is blocking embedded session cookies. Open this app in a new browser tab to use collaboration."
+with an "Open in new tab" action. No insecure URL token workaround.
+
+Session lifecycle:
+- valid cookie → reuse existing session
+- missing cookie → create new anonymous user
+- invalid/expired → null → caller may provision new
+- never rotates identity when valid cookie exists
 
 ## 8 · Running locally
 
 ```bash
-# prerequisites: Node 20+, PostgreSQL running (Docker works too)
-cp .env.example .env          # then set SESSION_SECRET
+# prerequisites: Node 20+, PostgreSQL running (Docker works too) — OR use preview fallback
+cp .env.example .env          # then set SESSION_SECRET for persistence
+# For Arena preview without postgres/redis:
+#   APP_ENV=preview USE_LOCAL_DEV_DB=true SESSION_SECRET=<random> npm run dev
+#   Uses ./data/tandem.db SQLite + in-memory cache automatically
+
+# With postgres/redis (production-like):
 docker compose up -d postgres redis   # or use your own instances
 npm install
-npx drizzle-kit push          # create tables
+npx drizzle-kit push          # create tables (postgres only, sqlite auto-creates)
 npm run dev                   # http://localhost:3000
 ```
 
 Seeded on first boot: a public demo room with code **TANDEM**.
 
+For local dev, if `SESSION_SECRET` is unset, an ephemeral per-process secret is used (sessions reset on restart) with a warning. Set a long random value for persistence.
+
+**Arena preview without external services:**
+```bash
+APP_ENV=preview
+USE_LOCAL_DEV_DB=true
+SESSION_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+SESSION_COOKIE_SECURE=true
+SESSION_COOKIE_SAMESITE=none
+SESSION_COOKIE_PARTITIONED=true
+npm run dev
+```
+This uses file-backed SQLite (`./data/tandem.db`) and in-memory cache — no postgres/redis needed. Production still requires PostgreSQL + Redis.
+
 ## 9 · Running with Docker (everything in one command)
 
 ```bash
-cp .env.example .env          # set SESSION_SECRET inside
+cp .env.example .env          # set SESSION_SECRET inside for local docker
 docker compose up --build     # → http://localhost:3000
 ```
 
@@ -168,10 +212,60 @@ in production mode. That's the entire topology — no other services.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | ✔ | PostgreSQL connection string |
-| `SESSION_SECRET` | ✔ prod | HMAC key for session cookies (≥16 chars). Unset → ephemeral per-process secret (sessions reset on restart) |
-| `REDIS_URL` | optional | Enables Redis room-buffer caching (else in-memory) |
+| `DATABASE_URL` | ✔ prod | PostgreSQL connection string — required in production non-preview |
+| `SESSION_SECRET` | ✔ prod/preview | HMAC key for session cookies (≥16 chars, 32-byte hex recommended). Production/preview MUST be set via platform secrets or local `.env` — app fails fast if missing. Local dev: optional ephemeral fallback with warning. |
+| `SESSION_COOKIE_SECURE` | optional | `true`/`false` — overrides Secure flag. Default: `true` in production/preview, `false` in dev |
+| `SESSION_COOKIE_SAMESITE` | optional | `none`/`lax`/`strict` — overrides SameSite. Default: `none` in production/preview (requires Secure), `lax` in dev |
+| `SESSION_COOKIE_PARTITIONED` | optional | `true`/`false` — enables Partitioned (CHIPS) for embedded preview. Default: `true` when Secure+SameSite=None, else `false` |
+| `APP_ENV` | optional | `preview` enables SQLite fallback + in-memory cache for Arena preview testing |
+| `USE_LOCAL_DEV_DB` | optional | `true` enables SQLite fallback (same as `APP_ENV=preview`) |
+| `SQLITE_DB_PATH` | optional | Path to SQLite file for preview fallback, default `./data/tandem.db` |
+| `REDIS_URL` | optional | Production: Redis URL for cache. Preview: if unset/unreachable, in-memory fallback used automatically |
 | `APP_URL` | optional | Canonical public origin, used for diagnostics |
+
+**Preview vs Production:**
+
+- **Preview (`APP_ENV=preview` or `USE_LOCAL_DEV_DB=true`):**
+  - SQLite file-backed DB (`./data/tandem.db`) when PostgreSQL unavailable
+  - In-memory cache fallback when Redis unavailable
+  - Requires `SESSION_SECRET` via local `.env` (gitignored) for this Arena workspace
+  - Cookie: `Secure=true, SameSite=None, Partitioned=true`
+
+- **Production:**
+  - PostgreSQL (`DATABASE_URL` required) + Redis (`REDIS_URL` optional but recommended)
+  - Persistent `SESSION_SECRET` via platform secrets UI
+  - Cookie: `Secure=true, SameSite=None, Partitioned=true`
+  - Fails fast if `SESSION_SECRET` or `DATABASE_URL` missing (unless explicit preview flag)
+
+### Critical deployment step — SESSION_SECRET
+
+The preview platform re-provisions `.env` and removes `SESSION_SECRET` if you edit it manually. **Do not rely on editing `.env` in the deployed preview environment.**
+
+Instead:
+
+1. Open the platform's environment variables / secrets configuration (e.g. Arena's Environment / Secrets UI).
+2. Add:
+   ```
+   SESSION_SECRET=<long-random-secret>
+   ```
+   Generate with:
+   ```
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
+3. For preview/production, also set:
+   ```
+   SESSION_COOKIE_SECURE=true
+   SESSION_COOKIE_SAMESITE=none
+   SESSION_COOKIE_PARTITIONED=true
+   ```
+   (The app defaults to these in production, but explicit is recommended for preview.)
+4. Redeploy / restart the application.
+5. Verify: `GET /api/session` twice returns the same user (check via browser devtools or `GET /api/session/diagnostic` in dev). Refresh should keep same identity.
+
+If `SESSION_SECRET` is missing in production/preview, the app **fails fast at startup** with:
+> "SESSION_SECRET is missing. Configure it in the deployment environment."
+
+Do not use an ephemeral fallback in production/preview — sessions would reset on every restart and cookies would fail to verify.
 
 ## 11 · API surface
 
@@ -179,6 +273,7 @@ in production mode. That's the entire topology — no other services.
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | public | liveness + cache mode |
 | `GET` | `/api/session` | public* | ensure/return the anonymous session *(issues one if absent)* |
+| `GET` | `/api/session/diagnostic` | dev only | cookie persistence diagnostic (no cookie values exposed) |
 | `PATCH` | `/api/session` | session | update own display name/color |
 | `POST` | `/api/rooms` | session | create room (server-minted code) |
 | `GET` | `/api/rooms/mine` | session | list caller's rooms |
@@ -186,9 +281,11 @@ in production mode. That's the entire topology — no other services.
 | `POST` | `/api/rooms/:code/leave` | member | drop presence (membership kept) |
 | `GET` | `/api/rooms/:code` | member | room info |
 | `PATCH` | `/api/rooms/:code` | **owner** | title/language (broadcast live) |
-| `GET` | `/api/rooms/:code/stream` | member | realtime channel |
+| `GET` | `/api/rooms/:code/stream` | member | realtime channel (EventSource withCredentials) |
 | `POST` | `/api/rooms/:code/operations` | member + verified connection | op upload |
 | `POST` | `/api/rooms/:code/presence` | member + verified connection | caret/selection/typing |
+
+All session-dependent frontend requests use `credentials: "include"` to preserve cookies in embedded preview.
 
 ## 12 · Try two-user collaboration
 
@@ -202,17 +299,29 @@ in production mode. That's the entire topology — no other services.
    from the authoritative snapshot.
 5. Try a bogus code (`XXXXXX`) → clean *"Room not found."* screen.
 
+If you see "Your browser is blocking embedded session cookies", click "Open in new tab" — some browsers block third-party partitioned cookies even with `Partitioned` attribute in strict modes.
+
 ## 13 · Tests
 
 ```bash
 npx vitest run
 ```
 
-41 unit tests cover: room-code generation/normalization/uniqueness,
+41+ unit tests cover: room-code generation/normalization/uniqueness,
 session-cookie signing + tamper rejection, payload/operation validation &
 bounds checks, OT transform convergence, and the sliding-window rate
 limiter. Route-level behavior (membership gates, owner-only meta, resync)
 is exercised in the manual acceptance flow above.
+
+Additional manual verification after cookie fix:
+- TEST A: First visit creates anonymous user, refresh keeps same user.
+- TEST B: Change display name Cobalt Osprey → Arka, save, refresh keeps Arka.
+- TEST C: Create Room → 201 + 6-char code + editor opens.
+- TEST D: Return home → room in Your Rooms, refresh keeps it.
+- TEST E: Incognito open shared link → Join Room → editor opens.
+- TEST F: Browser A types, B sees; B types, A sees.
+- TEST G: Languages C, Java, C++, Python, JS, TS, Markdown, JSON available.
+- TEST H: Restart server with same SESSION_SECRET → existing sessions still verify.
 
 ## 14 · Known limitations
 
@@ -229,6 +338,7 @@ is exercised in the manual acceptance flow above.
   the code again to rejoin).
 - No code execution: this is an editor/IDE surface; untrusted code is
   never executed server-side.
+- Some browsers in strict tracking prevention may still block partitioned third-party cookies in embedded iframes — top-level tab fallback is provided.
 
 ## 15 · Future improvements
 

@@ -29,6 +29,7 @@ import {
   type ClientUser,
   type RoomRole,
 } from "@/lib/types";
+import { apiFetch } from "@/lib/apiFetch";
 
 /**
  * EditorRoom — the collaborative workspace for one room code.
@@ -106,9 +107,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     if (leaving) return;
     setLeaving(true);
     try {
-      await fetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, {
+      await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, {
         method: "POST",
-        credentials: "same-origin",
       });
     } catch {
       /* leaving anyway */

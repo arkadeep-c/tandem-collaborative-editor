@@ -12,16 +12,13 @@ type RouteContext = { params: Promise<{ code: string }> };
 const PING_INTERVAL_MS = 20_000;
 
 /**
- * GET /api/rooms/:code/stream — the realtime gateway.
- *
- * Authentication happens BEFORE the stream opens: the signed session
- * cookie resolves the user, membership is verified against the database,
- * and only then does the connection join the room. Identity comes from
- * the users table — query params carry nothing security-relevant.
+ * GET /api/rooms/:code/stream — realtime gateway.
+ * Accepts cookie OR bearer fallback (Authorization: Bearer <token>).
+ * No token in URL.
  */
 export async function GET(request: NextRequest, ctx: RouteContext) {
   const { code: rawCode } = await ctx.params;
-  const access = await requireRoomAccess(rawCode);
+  const access = await requireRoomAccess(rawCode, request);
   if (!access.ok) {
     return new Response(JSON.stringify({ error: access.error }), {
       status: access.status,

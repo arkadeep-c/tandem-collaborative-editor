@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { roomEngine } from "@/lib/collab/rooms";
 import { metaUpdateLimiter } from "@/lib/rateLimit";
 import { requireRoomAccess } from "@/lib/roomAccess";
-import { getSessionUser, type SessionUser } from "@/lib/session";
+import { getAuthenticatedSessionFromRequest, type SessionUser } from "@/lib/session";
 import { cleanTitle, isLanguageId } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
@@ -13,10 +13,10 @@ function sessionOr401(session: SessionUser | null): session is SessionUser {
   return session !== null;
 }
 
-/** GET /api/rooms/:code — room info for verified members. */
-export async function GET(_request: NextRequest, ctx: RouteContext) {
+/** GET /api/rooms/:code — room info for verified members. Accepts cookie OR bearer. */
+export async function GET(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
-  const access = await requireRoomAccess(code);
+  const access = await requireRoomAccess(code, request);
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
@@ -39,13 +39,13 @@ export async function GET(_request: NextRequest, ctx: RouteContext) {
 
 /**
  * PATCH /api/rooms/:code — room metadata (title / language).
- * Owner-only: enforced via membership role, never via client claims.
- * Language changes broadcast live to every collaborator.
+ * Owner-only, accepts cookie OR bearer.
  */
 export async function PATCH(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
 
-  const session = await getSessionUser();
+  const auth = await getAuthenticatedSessionFromRequest(request);
+  const session = auth.session;
   if (!sessionOr401(session)) {
     return NextResponse.json({ error: "Session expired." }, { status: 401 });
   }
@@ -53,7 +53,7 @@ export async function PATCH(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "Too many updates." }, { status: 429 });
   }
 
-  const access = await requireRoomAccess(code, { ownerOnly: true });
+  const access = await requireRoomAccess(code, request, { ownerOnly: true });
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }

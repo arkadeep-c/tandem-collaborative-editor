@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { roomEngine } from "@/lib/collab/rooms";
 import { requireRoomAccess } from "@/lib/roomAccess";
 
@@ -7,13 +7,11 @@ export const dynamic = "force-dynamic";
 type RouteContext = { params: Promise<{ code: string }> };
 
 /**
- * POST /api/rooms/:code/leave — drop the caller's live presence and close
- * their stream. Membership is retained (refresh/rejoin stays instant);
- * rooms are never destroyed by someone leaving.
+ * POST /api/rooms/:code/leave — drop live presence. Accepts cookie OR bearer.
  */
-export async function POST(_request: Request, ctx: RouteContext) {
+export async function POST(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
-  const access = await requireRoomAccess(code);
+  const access = await requireRoomAccess(code, request);
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }

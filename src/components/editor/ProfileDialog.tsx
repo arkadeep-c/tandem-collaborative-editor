@@ -4,12 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, UserRound } from "lucide-react";
 import { PRESENCE_COLORS } from "@/lib/validation";
 import type { ClientUser } from "@/lib/types";
-
-/**
- * ProfileDialog — edits the cosmetic profile bound to the caller's
- * server-issued anonymous session (display name + presence color).
- * The underlying user id never changes and is never user-supplied.
- */
+import { apiFetch, handleSessionResponse } from "@/lib/apiFetch";
 
 interface ProfileDialogProps {
   user: ClientUser;
@@ -32,16 +27,17 @@ export default function ProfileDialog({ user, onClose }: ProfileDialogProps) {
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch("/api/session", {
+      const res = await apiFetch("/api/session", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
         body: JSON.stringify({ name, color }),
       });
       const data = (await res.json()) as {
         user?: ClientUser;
         error?: string;
+        sessionToken?: string;
       };
+      handleSessionResponse(data);
       if (!res.ok || !data.user) {
         throw new Error(data.error ?? "Could not save profile.");
       }

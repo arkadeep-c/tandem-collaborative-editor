@@ -29,12 +29,7 @@ import {
   type ClientUser,
   type RoomSummary,
 } from "@/lib/types";
-
-/**
- * HomeClient — the room lobby.
- * Create a room, join by code (normalized client-side, validated
- * server-side), or jump back into a room you already belong to.
- */
+import { apiFetch, handleSessionResponse } from "@/lib/apiFetch";
 
 const DEMO_ROOM_CODE = "TANDEM";
 
@@ -81,12 +76,14 @@ export default function HomeClient() {
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [bearerFallback, setBearerFallback] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch("/api/rooms/mine", { credentials: "same-origin" });
+      const res = await apiFetch("/api/rooms/mine");
       if (!res.ok) throw new Error(`${res.status}`);
-      const payload = (await res.json()) as { rooms: RoomSummary[] };
+      const payload = (await res.json()) as { rooms: RoomSummary[]; sessionToken?: string };
+      handleSessionResponse(payload);
       setRooms(payload.rooms);
       setLoadError(null);
     } catch {
@@ -97,9 +94,27 @@ export default function HomeClient() {
   useEffect(() => {
     void (async () => {
       try {
-        const res = await fetch("/api/session", { credentials: "same-origin" });
-        const data = (await res.json()) as { user: ClientUser };
+        const res = await apiFetch("/api/session");
+        const data = (await res.json()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
+        handleSessionResponse(data);
         setUser(data.user);
+        // If we received a bearer token, we are in fallback mode (cookie blocked)
+        if (data.sessionToken) {
+          setBearerFallback(true);
+        }
+        // Second check to detect if session persists (cookie or bearer)
+        try {
+          const res2 = await apiFetch("/api/session");
+          const data2 = (await res2.json()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
+          handleSessionResponse(data2);
+          if (data.user?.id && data2.user?.id && data.user.id !== data2.user.id) {
+            // Different ids → neither cookie nor bearer persisted, need to show message only if bearer also fails
+            // But with bearer fallback, this should not happen if storage works
+            setBearerFallback(false);
+          }
+        } catch {
+          // ignore
+        }
       } catch {
         setLoadError("Could not establish a session.");
       }
@@ -120,16 +135,17 @@ export default function HomeClient() {
     setBusy(true);
     setFormError(null);
     try {
-      const res = await fetch("/api/rooms", {
+      const res = await apiFetch("/api/rooms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
         body: JSON.stringify({ title: title.trim() || "Untitled", language }),
       });
       const data = (await res.json()) as {
         room?: { code: string };
         error?: string;
+        sessionToken?: string;
       };
+      handleSessionResponse(data);
       if (!res.ok || !data.room) {
         throw new Error(data.error ?? "Something went wrong. Please try again.");
       }
@@ -152,11 +168,11 @@ export default function HomeClient() {
       setBusy(true);
       setFormError(null);
       try {
-        const res = await fetch(
-          `/api/rooms/${encodeURIComponent(code)}/join`,
-          { method: "POST", credentials: "same-origin" },
-        );
-        const data = (await res.json()) as { error?: string };
+        const res = await apiFetch(`/api/rooms/${encodeURIComponent(code)}/join`, {
+          method: "POST",
+        });
+        const data = (await res.json()) as { error?: string; sessionToken?: string };
+        handleSessionResponse(data);
         if (!res.ok) {
           throw new Error(data.error ?? "Unable to join room.");
         }
@@ -182,7 +198,6 @@ export default function HomeClient() {
       />
 
       <div className="relative">
-        {/* nav */}
         <nav className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
           <div className="flex items-center gap-2.5">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/15 text-violet-300 ring-1 ring-violet-400/30">
@@ -230,10 +245,39 @@ export default function HomeClient() {
           </div>
         </nav>
 
-        {/* hero */}
+        {/* Only show cookie-blocked message if bearer fallback also fails */}
+        {loadError && !bearerFallback && (
+          <div className="mx-auto max-w-6xl px-6 pb-6">
+            <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
+              <p className="font-medium">
+                Could not establish a session. Your browser may be blocking both cookies and session storage. Open this app in a new browser tab.
+              </p>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.open(window.location.href, "_blank")}
+                  className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-black transition hover:bg-amber-300"
+                >
+                  Open in new tab
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {bearerFallback && (
+          <div className="mx-auto max-w-6xl px-6 pb-6">
+            <div className="rounded-xl border border-violet-400/30 bg-violet-400/10 px-4 py-3 text-sm text-violet-200">
+              <p className="font-medium">
+                Using secure bearer session fallback — your browser is blocking embedded cookies, but collaboration will still work in this preview.
+              </p>
+            </div>
+          </div>
+        )}
+
         <header className="mx-auto max-w-6xl px-6 pb-14 pt-12 md:pt-16">
           <motion.div
-            initial={{ opacity: 0, y: 18 }}
+            initial={{ opacity: 1, y: 18 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
           >
@@ -286,9 +330,8 @@ export default function HomeClient() {
             </div>
           </motion.div>
 
-          {/* stats strip */}
           <motion.div
-            initial={{ opacity: 0, y: 18 }}
+            initial={{ opacity: 1, y: 18 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.12, ease: [0.22, 1, 0.36, 1] }}
             className="mt-12 flex flex-wrap items-center gap-8 border-y border-white/[0.06] py-5"
@@ -309,7 +352,6 @@ export default function HomeClient() {
           </motion.div>
         </header>
 
-        {/* your rooms */}
         <section className="mx-auto max-w-6xl px-6 pb-20">
           <div className="mb-6 flex items-center justify-between">
             <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -349,7 +391,7 @@ export default function HomeClient() {
               {rooms.map((room, index) => (
                 <motion.div
                   key={room.code}
-                  initial={{ opacity: 0, y: 16 }}
+                  initial={{ opacity: 1, y: 16 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{
                     duration: 0.5,
@@ -401,13 +443,12 @@ export default function HomeClient() {
           )}
         </section>
 
-        {/* pillars */}
         <section className="mx-auto max-w-6xl px-6 pb-24">
           <div className="grid gap-4 md:grid-cols-3">
             {PILLARS.map(({ icon: Icon, title: pillarTitle, body }, index) => (
               <motion.div
                 key={pillarTitle}
-                initial={{ opacity: 0, y: 16 }}
+                initial={{ opacity: 1, y: 16 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, margin: "-60px" }}
                 transition={{ duration: 0.55, delay: index * 0.08 }}
@@ -433,7 +474,6 @@ export default function HomeClient() {
         </section>
       </div>
 
-      {/* create dialog */}
       {dialog === "create" && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-[#07090f]/80 p-4 backdrop-blur-md"
@@ -506,7 +546,6 @@ export default function HomeClient() {
         </div>
       )}
 
-      {/* join dialog */}
       {dialog === "join" && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-[#07090f]/80 p-4 backdrop-blur-md"

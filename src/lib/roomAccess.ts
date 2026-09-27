@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import type { NextRequest } from "next/server";
 import { db } from "@/db";
 import {
   documents,
@@ -8,15 +9,16 @@ import {
   type RoomMemberRow,
   type RoomRow,
 } from "@/db/schema";
-import { getSessionUser, type SessionUser } from "@/lib/session";
+import {
+  getAuthenticatedSessionFromRequest,
+  getSessionUser,
+  type SessionUser,
+} from "@/lib/session";
 import { isValidRoomCode, normalizeRoomCode } from "@/lib/roomCode";
 
 /**
  * Central authorization gate for every room-scoped route.
- *
- * Each sensitive endpoint calls `requireRoomAccess` (or the lighter
- * `findRoomByCode` for the public join-preview) so the checks are written
- * once: valid session → well-formed code → room exists → membership.
+ * Supports cookie primary + bearer fallback.
  */
 
 export interface RoomWithDocument {
@@ -62,15 +64,22 @@ export type RoomAccess =
   | { ok: false; status: 400 | 401 | 403 | 404; error: string };
 
 export interface RoomAccessOptions {
-  /** When true, the member must be the room owner. */
   ownerOnly?: boolean;
 }
 
 export async function requireRoomAccess(
   rawCode: string,
+  request?: NextRequest,
   options: RoomAccessOptions = {},
 ): Promise<RoomAccess> {
-  const session = await getSessionUser();
+  let session: SessionUser | null = null;
+  if (request) {
+    const auth = await getAuthenticatedSessionFromRequest(request);
+    session = auth.session;
+  } else {
+    session = await getSessionUser();
+  }
+
   if (!session) {
     return { ok: false, status: 401, error: "Session expired." };
   }

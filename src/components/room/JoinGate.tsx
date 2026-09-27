@@ -5,12 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Users } from "lucide-react";
 import { languageAccent } from "@/lib/types";
-
-/**
- * JoinGate — confirmation step for a valid room link before entering.
- * One click: the server (auto-provisioning a session if needed) records
- * membership, then the page refreshes into the editor.
- */
+import { apiFetch, handleSessionResponse } from "@/lib/apiFetch";
 
 interface JoinGateProps {
   code: string;
@@ -27,15 +22,25 @@ export default function JoinGate({ code, title, language }: JoinGateProps) {
     setJoining(true);
     setError(null);
     try {
-      const res = await fetch(
-        `/api/rooms/${encodeURIComponent(code)}/join`,
-        { method: "POST", credentials: "same-origin" },
-      );
-      const data = (await res.json()) as { error?: string };
+      const res = await apiFetch(`/api/rooms/${encodeURIComponent(code)}/join`, {
+        method: "POST",
+      });
+      const data = (await res.json()) as { error?: string; sessionToken?: string };
+      handleSessionResponse(data);
       if (!res.ok) {
         throw new Error(data.error ?? "Unable to join room.");
       }
-      router.refresh(); // re-run the server gate: now a member
+
+      router.refresh();
+      setTimeout(() => {
+        setJoining((prev) => {
+          if (prev) {
+            setError((e) => e ?? "Could not enter room. Please try again.");
+            return false;
+          }
+          return prev;
+        });
+      }, 3000);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to join room.");
       setJoining(false);

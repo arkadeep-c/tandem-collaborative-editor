@@ -1,17 +1,18 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db";
 import { documents, roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
-import { getSessionUser } from "@/lib/session";
+import { getAuthenticatedSessionFromRequest } from "@/lib/session";
 import type { RoomSummary } from "@/lib/types";
 import { count as drizzleCount } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/rooms/mine — rooms the verified session belongs to. */
-export async function GET() {
-  const session = await getSessionUser();
+/** GET /api/rooms/mine — rooms the verified session belongs to. Accepts cookie OR bearer. */
+export async function GET(request: NextRequest) {
+  const auth = await getAuthenticatedSessionFromRequest(request);
+  const session = auth.session;
   if (!session) {
     return NextResponse.json({ error: "Session expired." }, { status: 401 });
   }
@@ -33,7 +34,6 @@ export async function GET() {
     .orderBy(desc(rooms.updatedAt))
     .limit(100);
 
-  // Member counts for just these rooms (one grouped query, no N+1).
   const memberCounts = new Map<string, number>();
   if (memberships.length > 0) {
     const counts = await db
@@ -45,14 +45,14 @@ export async function GET() {
       .where(
         inArray(
           roomMembers.roomId,
-          memberships.map((m) => m.roomId),
+          memberships.map((m: any) => m.roomId),
         ),
       )
       .groupBy(roomMembers.roomId);
     for (const row of counts) memberCounts.set(row.roomId, row.total);
   }
 
-  const payload: RoomSummary[] = memberships.map((m) => ({
+  const payload: RoomSummary[] = memberships.map((m: any) => ({
     code: m.code,
     title: m.title,
     language: m.language,

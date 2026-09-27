@@ -43,10 +43,10 @@ function isSelection(value: unknown): value is SelectionRange {
   );
 }
 
-/** POST /api/rooms/:code/presence — caret/selection/typing fan-out. */
+/** POST /api/rooms/:code/presence — caret/selection/typing fan-out. Accepts cookie OR bearer. */
 export async function POST(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
-  const access = await requireRoomAccess(code);
+  const access = await requireRoomAccess(code, request);
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
@@ -56,7 +56,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "Malformed request." }, { status: 400 });
   }
   if (!presenceLimiter.hit(body.connectionId)) {
-    return NextResponse.json({ ok: true }); // silently shed presence load
+    return NextResponse.json({ ok: true });
   }
 
   const room = await roomEngine.getRoom(access.code);

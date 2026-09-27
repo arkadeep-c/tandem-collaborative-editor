@@ -4,33 +4,25 @@ import { operationsLimiter } from "@/lib/rateLimit";
 import { requireRoomAccess } from "@/lib/roomAccess";
 import { validateOps } from "@/lib/validation";
 import type { OperationAck, OperationStale } from "@/lib/types";
-import { getSessionUser } from "@/lib/session";
+import { getAuthenticatedSessionFromRequest } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string }> };
 
 /**
- * POST /api/rooms/:code/operations — the edit path.
- *
- * Verification chain (nothing client-supplied is trusted):
- *   valid session → room exists → caller is a member →
- *   the connection id belongs to the caller's session user →
- *   op batch passes structural+size validation →
- *   base revision is sane → OT apply under the room serializer.
- *
- * 200 → { ok, revision }        409 → snapshot for hard resync
+ * POST /api/rooms/:code/operations — edit path. Accepts cookie OR bearer.
  */
 export async function POST(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
 
-  // Order matters: read the session first for rate-limit keying.
-  const preSession = await getSessionUser();
+  const auth = await getAuthenticatedSessionFromRequest(request);
+  const preSession = auth.session;
   if (!preSession) {
     return NextResponse.json({ error: "Session expired." }, { status: 401 });
   }
 
-  const access = await requireRoomAccess(code);
+  const access = await requireRoomAccess(code, request);
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
@@ -65,8 +57,6 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "Room not found." }, { status: 404 });
   }
 
-  // A connection id proves nothing by itself — it must be bound to the
-  // caller's user inside this room's live registry.
   if (!room.connectionBelongsTo(body.connectionId, access.session.user.id)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 403 });
   }

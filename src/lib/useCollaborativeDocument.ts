@@ -12,17 +12,7 @@ import type {
   ServerEvent,
   TextOp,
 } from "@/lib/types";
-
-/**
- * useCollaborativeDocument — browser-side OT client for one room.
- *
- * Identity enters this hook exclusively FROM the server:
- *   GET /api/session (signed HttpOnly cookie) → stream init snapshot
- *   carries { you, sessionId } — the client never asserts who it is.
- *
- * Sync FSM (see README): revision / outstanding / buffer, with the
- * author's echo acting as the ordered ack.
- */
+import { apiFetch, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 
 export type ConnectionStatus =
   | "connecting"
@@ -63,6 +53,7 @@ const GONE_AFTER_MS = 15_000;
 type SessionResponse = {
   user: { id: string; name: string; color: string };
   fresh: boolean;
+  sessionToken?: string;
 };
 
 export function useCollaborativeDocument(roomCode: string) {
@@ -88,6 +79,7 @@ export function useCollaborativeDocument(roomCode: string) {
   const bridgeRef = useRef<EditorBridge | null>(null);
   const snapshotRef = useRef<{ content: string } | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
+  const fetchControllerRef = useRef<AbortController | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presenceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const failuresRef = useRef(0);
@@ -97,13 +89,11 @@ export function useCollaborativeDocument(roomCode: string) {
     [],
   );
 
-  /* ------------------------------------------------------------------ */
-  /* Ops upload                                                          */
-  /* ------------------------------------------------------------------ */
-
   const pump = useCallback(async () => {
     if (outstandingRef.current || bufferRef.current.length === 0) return;
-    if (!sourceRef.current || sourceRef.current.readyState !== EventSource.OPEN) {
+    const hasEventSource = sourceRef.current && sourceRef.current.readyState === EventSource.OPEN;
+    const hasFetchStream = fetchControllerRef.current && !fetchControllerRef.current.signal.aborted;
+    if (!hasEventSource && !hasFetchStream) {
       return;
     }
     if (!connectionIdRef.current) return;
@@ -118,12 +108,11 @@ export function useCollaborativeDocument(roomCode: string) {
     patchState({ unsent: true });
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/rooms/${encodeURIComponent(roomCode)}/operations`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
           body: JSON.stringify(batch),
         },
       );
@@ -141,15 +130,14 @@ export function useCollaborativeDocument(roomCode: string) {
         return;
       }
       if (!res.ok) throw new Error(`operations failed: ${res.status}`);
-      // Success completes via the ordered stream echo.
     } catch {
-      // Transport/security failure — close the stream and let the
-      // reconnect path restore an authoritative snapshot.
       outstandingRef.current = null;
       bufferRef.current = [];
       patchState({ unsent: false });
       sourceRef.current?.close();
       sourceRef.current = null;
+      fetchControllerRef.current?.abort();
+      fetchControllerRef.current = null;
       patchState({ connection: "reconnecting" });
       reconnectTimerRef.current = setTimeout(
         () => void openStreamRef.current(),
@@ -160,10 +148,6 @@ export function useCollaborativeDocument(roomCode: string) {
 
   const pumpRef = useRef(pump);
   pumpRef.current = pump;
-
-  /* ------------------------------------------------------------------ */
-  /* Event stream                                                        */
-  /* ------------------------------------------------------------------ */
 
   const openStreamRef = useRef<() => Promise<void>>(async () => {});
 
@@ -269,22 +253,83 @@ export function useCollaborativeDocument(roomCode: string) {
       }
     };
 
-    const open = async () => {
+    const parseSseChunk = (chunk: string, buffer: { text: string }) => {
+      buffer.text += chunk;
+      const events: { event: string; data: string }[] = [];
+      let idx: number;
+      while ((idx = buffer.text.indexOf("\n\n")) !== -1) {
+        const raw = buffer.text.slice(0, idx);
+        buffer.text = buffer.text.slice(idx + 2);
+        if (!raw.trim() || raw.startsWith(":")) continue; // ping or empty
+        let eventName = "message";
+        let data = "";
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            data += line.slice(5).trim();
+          }
+        }
+        if (data) {
+          events.push({ event: eventName, data });
+        }
+      }
+      return events;
+    };
+
+    const openFetchStream = async () => {
       if (disposed) return;
       try {
-        // Ensure the cookie session exists before opening the stream
-        // (covers expiry between page load and connect).
-        const res = await fetch("/api/session", { credentials: "same-origin" });
-        if (!res.ok) throw new Error(`session: ${res.status}`);
-        (await res.json()) as SessionResponse;
-      } catch {
-        scheduleReconnect();
-        return;
-      }
-      if (disposed) return;
+        const controller = new AbortController();
+        fetchControllerRef.current = controller;
 
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(roomCode)}/stream`,
+          {
+            method: "GET",
+            headers: { Accept: "text/event-stream" },
+            signal: controller.signal,
+          },
+        );
+
+        if (!res.ok) throw new Error(`stream: ${res.status}`);
+        if (!res.body) throw new Error("no body");
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        const buf = { text: "" };
+
+        while (!disposed) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          const evts = parseSseChunk(chunk, buf);
+          for (const e of evts) {
+            try {
+              const parsed = JSON.parse(e.data) as ServerEvent;
+              // Ensure event type matches SSE event name if needed
+              if (!parsed.type) {
+                (parsed as any).type = e.event;
+              }
+              handleEvent(parsed);
+            } catch {
+              // ignore malformed
+            }
+          }
+        }
+      } catch (err) {
+        if (disposed) return;
+        if ((err as any)?.name === "AbortError") return;
+        fetchControllerRef.current = null;
+        scheduleReconnect();
+      }
+    };
+
+    const openEventSource = async () => {
+      if (disposed) return;
       const source = new EventSource(
         `/api/rooms/${encodeURIComponent(roomCode)}/stream`,
+        { withCredentials: true } as EventSourceInit,
       );
       sourceRef.current = source;
 
@@ -311,6 +356,28 @@ export function useCollaborativeDocument(roomCode: string) {
         sourceRef.current = null;
         scheduleReconnect();
       };
+    };
+
+    const open = async () => {
+      if (disposed) return;
+      try {
+        const res = await apiFetch("/api/session");
+        if (!res.ok) throw new Error(`session: ${res.status}`);
+        const sessData = (await res.json()) as SessionResponse;
+        handleSessionResponse(sessData);
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      if (disposed) return;
+
+      const token = getStoredToken();
+      if (token) {
+        // Bearer fallback: use fetch streaming with Authorization header
+        await openFetchStream();
+      } else {
+        await openEventSource();
+      }
     };
 
     const scheduleReconnect = () => {
@@ -348,14 +415,12 @@ export function useCollaborativeDocument(roomCode: string) {
       disposed = true;
       sourceRef.current?.close();
       sourceRef.current = null;
+      fetchControllerRef.current?.abort();
+      fetchControllerRef.current = null;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (presenceTimerRef.current) clearInterval(presenceTimerRef.current);
     };
   }, [roomCode, patchState]);
-
-  /* ------------------------------------------------------------------ */
-  /* Public API                                                          */
-  /* ------------------------------------------------------------------ */
 
   const setBridge = useCallback((bridge: EditorBridge | null) => {
     bridgeRef.current = bridge;
@@ -378,10 +443,9 @@ export function useCollaborativeDocument(roomCode: string) {
     (patch: PresencePatch) => {
       const connectionId = connectionIdRef.current;
       if (!connectionId) return;
-      void fetch(`/api/rooms/${encodeURIComponent(roomCode)}/presence`, {
+      void apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}/presence`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
         body: JSON.stringify({ connectionId, ...patch }),
       }).catch(() => undefined);
     },
@@ -390,10 +454,9 @@ export function useCollaborativeDocument(roomCode: string) {
 
   const updateMeta = useCallback(
     async (patch: { title?: string; language?: string }) => {
-      await fetch(`/api/rooms/${encodeURIComponent(roomCode)}`, {
+      await apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
         body: JSON.stringify(patch),
       }).catch(() => undefined);
     },
