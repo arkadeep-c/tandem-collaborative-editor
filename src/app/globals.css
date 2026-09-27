@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+::selection {
+  background: #8b5cf655;
+  color: #f5f3ff;
+}
+
+/* ------------------------------------------------------------------ */
+/* Scrollbars                                                          */
+/* ------------------------------------------------------------------ */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a3145 transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #232a3d;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/* Landing backdrop                                                    */
+/* ------------------------------------------------------------------ */
+
+.bg-grid {
+  background-image:
+    linear-gradient(to right, #ffffff08 1px, transparent 1px),
+    linear-gradient(to bottom, #ffffff08 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 40%, transparent 100%);
+}
+
+@keyframes aurora-drift {
+  0%,
+  100% {
+    transform: translate3d(-8%, -4%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(6%, 8%, 0) scale(1.12);
+  }
+}
+
+.aurora {
+  animation: aurora-drift 16s ease-in-out infinite;
+  filter: blur(90px);
+  will-change: transform;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.fade-up {
+  animation: fade-up 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ------------------------------------------------------------------ */
+/* Monaco remote presence primitives                                   */
+/* ------------------------------------------------------------------ */
+
+.tandem-caret {
+  display: inline-block;
+  width: 0;
+  overflow: visible;
+}
+
+.monaco-editor .view-overlays .tandem-caret::before {
+  /* name flags always on top */
+  z-index: 40;
+}
+
+/* Text cursor inside the editor uses the room's display font */
+.monaco-editor {
+  outline: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion                                                      */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora,
+  .fade-up {
+    animation: none;
+  }
+}
