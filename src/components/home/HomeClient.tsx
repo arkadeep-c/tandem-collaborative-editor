@@ -80,42 +80,65 @@ export default function HomeClient() {
 
   const refresh = useCallback(async () => {
     try {
+      console.log("[HOME] refresh /api/rooms/mine start");
       const res = await apiFetch("/api/rooms/mine");
-      if (!res.ok) throw new Error(`${res.status}`);
+      console.log("[HOME] rooms/mine response", { status: res.status, ok: res.ok });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        console.warn("[HOME] rooms/mine failed", { status: res.status, body: errBody });
+        throw new Error(`${res.status}`);
+      }
       const payload = (await res.json()) as { rooms: RoomSummary[]; sessionToken?: string };
       handleSessionResponse(payload);
+      console.log("[HOME] rooms loaded", { count: payload.rooms.length });
       setRooms(payload.rooms);
       setLoadError(null);
-    } catch {
+    } catch (e) {
+      console.error("[HOME] refresh failed", e);
       setLoadError("Could not load your rooms.");
     }
   }, []);
 
   useEffect(() => {
     void (async () => {
+      console.log("[HOME] session init start");
       try {
         const res = await apiFetch("/api/session");
+        console.log("[HOME] session response", { status: res.status, ok: res.ok });
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "no body");
+          console.error("[HOME] session failed status", { status: res.status, body: errText.slice(0, 200) });
+          throw new Error(`session ${res.status}`);
+        }
         const data = (await res.json()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
+        console.log("[HOME] session data", { id: data.user?.id?.slice(0, 8), name: data.user?.name, fresh: data.fresh, hasToken: !!data.sessionToken });
         handleSessionResponse(data);
         setUser(data.user);
-        // If we received a bearer token, we are in fallback mode (cookie blocked)
         if (data.sessionToken) {
+          console.log("[HOME] bearer fallback active");
           setBearerFallback(true);
+        } else {
+          console.log("[HOME] cookie auth active (no token returned)");
         }
-        // Second check to detect if session persists (cookie or bearer)
+
+        // Second check to detect if session persists (cookie or bearer via sessionStorage or in-memory)
         try {
           const res2 = await apiFetch("/api/session");
           const data2 = (await res2.json()) as { user: ClientUser; fresh?: boolean; sessionToken?: string };
+          console.log("[HOME] session persistence check", { id1: data.user?.id?.slice(0, 8), id2: data2.user?.id?.slice(0, 8), same: data.user?.id === data2.user?.id });
           handleSessionResponse(data2);
           if (data.user?.id && data2.user?.id && data.user.id !== data2.user.id) {
-            // Different ids → neither cookie nor bearer persisted, need to show message only if bearer also fails
-            // But with bearer fallback, this should not happen if storage works
-            setBearerFallback(false);
+            console.warn("[HOME] session not persisting, ids differ - storage may be blocked, but in-memory fallback should handle");
+            // With in-memory fallback, this should not happen, but if it does, we still have a valid session (data2)
+            setUser(data2.user);
+            // Keep bearerFallback true if we have token in memory
+            // Don't set to false here, as in-memory fallback still works
           }
-        } catch {
-          // ignore
+        } catch (e) {
+          console.warn("[HOME] second session check failed", e);
         }
-      } catch {
+      } catch (e) {
+        console.error("[HOME] session init failed", e);
         setLoadError("Could not establish a session.");
       }
       await refresh();
