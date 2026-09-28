@@ -162,7 +162,7 @@ describe("Java sandbox configuration", () => {
       "-Xmx256m",
       "-XX:+UseSerialGC",
       "-XX:ActiveProcessorCount=1",
-      "-Xss256k",
+      "-Xss512k",
       "-XX:CICompilerCount=1",
       "-XX:TieredStopAtLevel=1",
       "-XX:MaxMetaspaceSize=128m",
