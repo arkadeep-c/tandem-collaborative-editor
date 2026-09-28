@@ -4,6 +4,8 @@ import {
   executeCode,
   getExecutionAvailability,
   getHostExecutionPath,
+  JAVAC_VM_ARGS,
+  JAVA_VM_ARGS,
   parseBashErrors,
   parseCppErrors,
   parseJavaErrors,
@@ -105,6 +107,24 @@ describe("Docker execution readiness", () => {
       if (previousImage === undefined) delete process.env.TANDEM_EXECUTION_IMAGE;
       else process.env.TANDEM_EXECUTION_IMAGE = previousImage;
     }
+  });
+});
+
+describe("Java sandbox configuration", () => {
+  it("uses container-friendly JVM flags for both javac and java", () => {
+    expect(JAVA_VM_ARGS).toEqual(expect.arrayContaining([
+      "-Xmx256m",
+      "-XX:+UseSerialGC",
+      "-XX:ActiveProcessorCount=1",
+      "-Xss256k",
+      "-XX:CICompilerCount=1",
+      "-XX:TieredStopAtLevel=1",
+      "-XX:MaxMetaspaceSize=128m",
+      "-XX:ReservedCodeCacheSize=32m",
+      "-XX:-UsePerfData",
+      "-Djava.io.tmpdir=.",
+    ]));
+    expect(JAVAC_VM_ARGS).toEqual(JAVA_VM_ARGS.map((arg) => `-J${arg}`));
   });
 });
 

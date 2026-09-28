@@ -22,15 +22,19 @@ export function getHostExecutionPath(
   return hostPlatform === "win32" ? hostPath ?? "" : SAFE_PATH;
 }
 
-const JAVA_VM_ARGS = [
+export const JAVA_VM_ARGS = [
   "-Xmx256m",
   "-XX:+UseSerialGC",
+  "-XX:ActiveProcessorCount=1",
+  "-Xss256k",
+  "-XX:CICompilerCount=1",
+  "-XX:TieredStopAtLevel=1",
   "-XX:MaxMetaspaceSize=128m",
   "-XX:ReservedCodeCacheSize=32m",
   "-XX:-UsePerfData",
   "-Djava.io.tmpdir=.",
 ] as const;
-const JAVAC_VM_ARGS = JAVA_VM_ARGS.map((arg) => `-J${arg}`);
+export const JAVAC_VM_ARGS = JAVA_VM_ARGS.map((arg) => `-J${arg}`);
 
 export function createDockerWorkspaceMount(workDir: string): string {
   return `${workDir}:/workspace:rw`;
