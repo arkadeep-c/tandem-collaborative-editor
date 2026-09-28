@@ -254,6 +254,29 @@ This uses:
 For PostgreSQL/Redis development, provide `DATABASE_URL` and optionally
 `REDIS_URL`, then run the app normally.
 
+### Windows local execution setup
+
+Do not install compilers directly into the Windows host just to run Tandem code.
+Use Docker Desktop with Linux containers:
+
+```powershell
+# from the repository root
+docker version
+docker build -f docker/executor.Dockerfile -t tandem-executor:local .
+
+$env:TANDEM_EXECUTION_BACKEND = "docker"
+$env:TANDEM_EXECUTION_IMAGE = "tandem-executor:local"
+$env:APP_ENV = "preview"
+$env:USE_LOCAL_DEV_DB = "true"
+$env:SESSION_SECRET = "replace-with-a-long-random-dev-secret"
+npm run dev
+```
+
+Then open `/api/execution`. The response should show every executable language
+with `ready: true`. If Docker is not available, execution stays unavailable and
+fails closed; the editor, collaboration, Markdown, HTML/CSS preview, and JSON
+tooling still work.
+
 ---
 
 ## Standard commands

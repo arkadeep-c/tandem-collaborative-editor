@@ -39,13 +39,12 @@ import {
   LANGUAGE_OPTIONS,
   LANGUAGE_STARTERS,
   fileExtensionFor,
-  isExecutableLanguage,
   languageAccent,
   type ClientUser,
   type RoomRole,
 } from "@/lib/types";
 import { apiFetch, ensureClientSession } from "@/lib/apiFetch";
-import type { ExecutionResult, ExecutionProblem } from "@/lib/execution/types";
+import { isExecutionLanguage, type ExecutionAvailability, type ExecutionProblem, type ExecutionResult } from "@/lib/execution/types";
 
 type ViewMode = "edit" | "split" | "preview";
 type BottomTab = "output" | "problems" | "input";
@@ -69,6 +68,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
   // Execution state
   const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
+  const [executionAvailability, setExecutionAvailability] = useState<ExecutionAvailability | null>(null);
   const [running, setRunning] = useState(false);
   const [stdin, setStdin] = useState("");
   const [bottomTab, setBottomTab] = useState<BottomTab>("output");
@@ -93,7 +93,11 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const viewMode =
     (hasPreview ? manualViewMode : null) ?? (hasPreview ? "split" : "edit");
 
-  const isExecutable = isExecutableLanguage(state.language);
+  const isExecutable = isExecutionLanguage(state.language);
+  const currentExecutionAvailability = isExecutable
+    ? executionAvailability?.languages[state.language as keyof ExecutionAvailability["languages"]]
+    : null;
+  const executionReady = !isExecutable || currentExecutionAvailability?.ready !== false;
 
   const latestMirrorRef = useRef("");
   const mirrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -108,6 +112,19 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
   const getCurrentContent = useCallback(() => {
     return editorRef.current?.getModel()?.getValue() ?? latestMirrorRef.current ?? "";
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void fetch("/api/execution", { headers: { Accept: "application/json" } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: ExecutionAvailability | null) => {
+        if (!disposed && data) setExecutionAvailability(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   const setProblemMarkers = useCallback((problems: ExecutionProblem[]) => {
@@ -152,9 +169,13 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     } catch {}
   }, []);
 
+  const exitRoom = useCallback(() => {
+    router.push("/");
+  }, [router]);
+
   const leaveRoom = useCallback(async () => {
     if (leaving) return;
-    if (!window.confirm(`Leave room ${room.code}?\n\nYou can rejoin later with the invite link or room code.`)) return;
+    if (!window.confirm(`Leave room ${room.code}?\n\nThis removes the room from Your Rooms for this browser session. Use Back/Home if you only want to exit the editor.`)) return;
     setLeaving(true);
     try {
       await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, {
@@ -166,6 +187,19 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
   const runCode = useCallback(async () => {
     if (running) return;
+    if (isExecutable && currentExecutionAvailability?.ready === false) {
+      setBottomOpen(true);
+      setBottomTab("output");
+      setExecutionResult({
+        status: "unavailable",
+        stdout: "",
+        stderr: currentExecutionAvailability.reason ?? "Code execution is unavailable because the required execution runtime is not configured.",
+        exitCode: null,
+        duration: 0,
+        problems: [],
+      });
+      return;
+    }
     const code = getCurrentContent();
     if (!code.trim()) return;
 
@@ -218,7 +252,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     } finally {
       setRunning(false);
     }
-  }, [getCurrentContent, running, room.code, setProblemMarkers, state.language, stdin]);
+  }, [currentExecutionAvailability, getCurrentContent, isExecutable, running, room.code, setProblemMarkers, state.language, stdin]);
 
   useEffect(() => {
     const handleRun = () => {
@@ -384,9 +418,10 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       <header className="flex h-14 shrink-0 items-center gap-3 overflow-x-auto border-b border-white/[0.06] bg-[#0b0e14]/90 px-4 backdrop-blur">
         <button
           type="button"
-          onClick={() => void leaveRoom()}
+          onClick={exitRoom}
           className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-white/20 hover:text-slate-100"
-          aria-label="Leave room"
+          aria-label="Back to rooms"
+          title="Back to rooms"
         >
           {leaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowLeft className="h-4 w-4" />}
         </button>
@@ -463,11 +498,24 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
                 onClick={() => void runCode()}
                 disabled={running}
                 className="flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-50"
-                title="Run code (Ctrl+Enter)"
+                title={currentExecutionAvailability?.ready === false ? currentExecutionAvailability.reason : "Run code (Ctrl+Enter)"}
               >
                 {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
                 Run
               </button>
+            )}
+            {isExecutable && currentExecutionAvailability && (
+              <span
+                className={clsx(
+                  "hidden rounded-full border px-2 py-1 text-[10px] font-semibold lg:inline-flex",
+                  currentExecutionAvailability.ready
+                    ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-200"
+                    : "border-amber-300/20 bg-amber-300/10 text-amber-200",
+                )}
+                title={currentExecutionAvailability.ready ? "Execution runtime ready" : currentExecutionAvailability.reason}
+              >
+                {currentExecutionAvailability.ready ? "Ready" : "Execution unavailable"}
+              </span>
             )}
             {state.language === "json" && (
               <>
@@ -557,6 +605,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             <button
               onClick={() => void leaveRoom()}
               className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-rose-400/40 hover:text-rose-300"
+              aria-label="Leave room"
+              title="Leave room"
             >
               <LogOut className="h-3.5 w-3.5" />
             </button>

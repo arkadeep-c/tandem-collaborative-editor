@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { transformBatch } from "@/lib/ot";
+import { applyOp, transformBatch } from "@/lib/ot";
 import type {
   ClientUser,
   CursorPosition,
@@ -125,8 +125,9 @@ export function useCollaborativeDocument(roomCode: string) {
         outstandingRef.current = null;
         bufferRef.current = [];
         revisionRef.current = stale.revision;
+        snapshotRef.current = { content: stale.content };
         bridgeRef.current?.reset(stale.content);
-        patchState({ revision: stale.revision, unsent: false });
+        patchState({ revision: stale.revision, syncedRevision: stale.revision, unsent: false });
         return;
       }
       if (!res.ok) throw new Error(`operations failed: ${res.status}`);
@@ -184,6 +185,11 @@ export function useCollaborativeDocument(roomCode: string) {
           break;
         }
         case "op": {
+          if (snapshotRef.current && event.ops.length > 0) {
+            for (const op of event.ops) {
+              snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
+            }
+          }
           if (event.by === connectionIdRef.current) {
             revisionRef.current = event.revision;
             outstandingRef.current = null;
@@ -223,7 +229,8 @@ export function useCollaborativeDocument(roomCode: string) {
                 : prev.users.map((u) =>
                     u.sessionId === event.user.sessionId ? event.user : u,
                   );
-            return { ...prev, users };
+            const you = prev.you?.id === event.user.user.id ? event.user.user : prev.you;
+            return { ...prev, users, you };
           });
           break;
         }

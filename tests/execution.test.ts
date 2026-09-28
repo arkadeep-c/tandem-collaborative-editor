@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { executeCode, parseBashErrors, parseCppErrors, parseJsErrors, parsePythonErrors } from "@/lib/execution/executor";
+import { executeCode, getExecutionAvailability, parseBashErrors, parseCppErrors, parseJsErrors, parsePythonErrors } from "@/lib/execution/executor";
 import { EXECUTABLE_LANGUAGES, isExecutionLanguage, LANGUAGE_CONFIG } from "@/lib/execution/types";
 import { LANGUAGE_OPTIONS } from "@/lib/types";
 
@@ -54,6 +54,20 @@ describe("execution diagnostics parsers", () => {
 });
 
 describe("execution fail-closed mode", () => {
+  it("reports execution availability as unconfigured when disabled", async () => {
+    const previous = process.env.TANDEM_EXECUTION_BACKEND;
+    process.env.TANDEM_EXECUTION_BACKEND = "disabled";
+    try {
+      const availability = await getExecutionAvailability();
+      expect(availability.configured).toBe(false);
+      expect(availability.backend).toBeNull();
+      expect(availability.languages.c.ready).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.TANDEM_EXECUTION_BACKEND;
+      else process.env.TANDEM_EXECUTION_BACKEND = previous;
+    }
+  });
+
   it("returns unavailable instead of raw spawn errors when disabled", async () => {
     const previous = process.env.TANDEM_EXECUTION_BACKEND;
     process.env.TANDEM_EXECUTION_BACKEND = "disabled";

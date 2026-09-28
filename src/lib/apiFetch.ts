@@ -301,6 +301,10 @@ export async function apiFetch(
 }
 
 export function handleSessionResponse(data: any): void {
+  if (data?.user?.id) {
+    lastSessionData = { ...(lastSessionData ?? {}), ...data, user: data.user };
+    sessionBootstrapDone = true;
+  }
   if (data && typeof data.sessionToken === "string" && data.sessionToken.length > 10) {
     if (process.env.NODE_ENV === "development") {
       console.log("[AUTH] handleSessionResponse storing token", { len: data.sessionToken.length });

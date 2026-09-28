@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { tmpdir, platform } from "os";
-import type { ExecutionLanguage, ExecutionProblem, ExecutionResult } from "./types";
+import { EXECUTABLE_LANGUAGES, type ExecutionAvailability, type ExecutionLanguage, type ExecutionProblem, type ExecutionResult } from "./types";
 
 const TIMEOUT_MS = 10_000;
 const COMPILE_TIMEOUT_MS = 8_000;
@@ -282,17 +282,74 @@ function backendUnavailableMessage(): string {
   return "Code execution is unavailable because no supported isolated execution runtime is configured. Configure a Linux Docker sandbox image with TANDEM_EXECUTION_IMAGE, or use the documented Linux/WSL development sandbox. Unsafe host execution is disabled.";
 }
 
+async function dockerToolExists(backend: SandboxBackend, tool: string): Promise<boolean> {
+  const workDir = await fs.mkdtemp(join(tmpdir(), "tandem-exec-check-"));
+  try {
+    const result = await backend.run("bash", ["-lc", `command -v ${JSON.stringify(tool)} >/dev/null 2>&1`], {
+      cwd: workDir,
+      timeoutMs: 4000,
+    });
+    return result.exitCode === 0;
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+export async function getExecutionAvailability(): Promise<ExecutionAvailability> {
+  const languages = Object.fromEntries(
+    EXECUTABLE_LANGUAGES.map((language) => [
+      language,
+      { ready: false, reason: backendUnavailableMessage() },
+    ]),
+  ) as ExecutionAvailability["languages"];
+
+  const backend = await resolveBackend();
+  if (!backend) {
+    return {
+      configured: false,
+      backend: null,
+      productionSafe: false,
+      message: backendUnavailableMessage(),
+      languages,
+    };
+  }
+
+  for (const language of EXECUTABLE_LANGUAGES) {
+    const missing: string[] = [];
+    for (const tool of EXECUTION_TOOL_REQUIREMENTS[language]) {
+      const exists = backend.name === "docker"
+        ? await dockerToolExists(backend, tool)
+        : await commandExists(tool);
+      if (!exists) missing.push(tool);
+    }
+    languages[language] = missing.length === 0
+      ? { ready: true }
+      : {
+          ready: false,
+          reason: `Execution runtime missing in configured sandbox: ${missing.join(", ")}.`,
+        };
+  }
+
+  return {
+    configured: Object.values(languages).some((entry) => entry.ready),
+    backend: backend.name,
+    productionSafe: backend.productionSafe,
+    languages,
+  };
+}
+
+const EXECUTION_TOOL_REQUIREMENTS: Record<ExecutionLanguage, string[]> = {
+  c: ["gcc"],
+  cpp: ["g++"],
+  python: ["python3"],
+  javascript: ["node"],
+  typescript: ["node"],
+  bash: ["bash"],
+};
+
 async function requireTools(language: ExecutionLanguage, backend: SandboxBackend): Promise<string | null> {
   if (backend.name === "docker") return null;
-  const tools: Record<ExecutionLanguage, string[]> = {
-    c: ["gcc"],
-    cpp: ["g++"],
-    python: ["python3"],
-    javascript: ["node"],
-    typescript: ["node"],
-    bash: ["bash"],
-  };
-  for (const tool of tools[language]) {
+  for (const tool of EXECUTION_TOOL_REQUIREMENTS[language]) {
     if (!(await commandExists(tool))) {
       return `Code execution is unavailable because the ${tool} runtime is missing from the configured sandbox environment.`;
     }

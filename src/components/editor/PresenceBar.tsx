@@ -31,8 +31,21 @@ export default function PresenceBar({
   onEditProfile,
 }: PresenceBarProps) {
   const [hovered, setHovered] = useState<string | null>(null);
-  const visible = users.slice(0, MAX_VISIBLE);
-  const overflow = users.length - visible.length;
+  const deduped = Array.from(
+    users.reduce((map, presence) => {
+      const existing = map.get(presence.user.id);
+      if (
+        !existing ||
+        presence.sessionId === selfSessionId ||
+        presence.lastActiveAt > existing.lastActiveAt
+      ) {
+        map.set(presence.user.id, presence);
+      }
+      return map;
+    }, new Map<string, PresenceState>()).values(),
+  ).sort((a, b) => a.joinedAt - b.joinedAt);
+  const visible = deduped.slice(0, MAX_VISIBLE);
+  const overflow = deduped.length - visible.length;
 
   return (
     <div className="flex items-center">

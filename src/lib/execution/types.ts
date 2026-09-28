@@ -50,6 +50,19 @@ export interface ExecutionRequest {
   roomCode?: string;
 }
 
+export interface ExecutionLanguageAvailability {
+  ready: boolean;
+  reason?: string;
+}
+
+export interface ExecutionAvailability {
+  configured: boolean;
+  backend: "docker" | "linux-namespace" | null;
+  productionSafe: boolean;
+  message?: string;
+  languages: Record<ExecutionLanguage, ExecutionLanguageAvailability>;
+}
+
 export const EXECUTABLE_LANGUAGES = EXECUTABLE_LANGUAGE_IDS as ExecutionLanguage[];
 
 export const LANGUAGE_CONFIG = LANGUAGE_DEFINITIONS.reduce(
