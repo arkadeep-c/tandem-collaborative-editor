@@ -1090,9 +1090,9 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           cache: {state.cacheMode === "redis" ? "Redis" : state.cacheMode === "memory" ? "in-memory" : "—"}
         </span>
         {typingStatus && (
-          <span className="hidden items-center gap-1.5 rounded-full border border-teal-300/15 bg-teal-300/10 px-2 py-0.5 font-medium text-teal-100 md:flex">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-300" />
-            {typingStatus}
+          <span className="inline-flex max-w-[45vw] items-center gap-1.5 truncate rounded-full border border-teal-300/15 bg-teal-300/10 px-2 py-0.5 font-medium text-teal-100">
+            <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-teal-300" />
+            <span className="truncate">{typingStatus}</span>
           </span>
         )}
         {!bottomOpen && (
