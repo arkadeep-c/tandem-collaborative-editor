@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Clock, Copy, Trash2, XCircle, AlertTriangle, Terminal } from "lucide-react";
+import { Check, Clock, Copy, Trash2, XCircle, AlertTriangle, Terminal, Square } from "lucide-react";
 import clsx from "clsx";
 import type { ExecutionResult } from "@/lib/execution/types";
 
@@ -9,9 +9,10 @@ interface OutputPanelProps {
   result: ExecutionResult | null;
   running: boolean;
   onClear: () => void;
+  onStop?: () => void;
 }
 
-export default function OutputPanel({ result, running, onClear }: OutputPanelProps) {
+export default function OutputPanel({ result, running, onClear, onStop }: OutputPanelProps) {
   const [copied, setCopied] = useState(false);
 
   const copyOutput = async () => {
@@ -32,6 +33,16 @@ export default function OutputPanel({ result, running, onClear }: OutputPanelPro
             <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
             Running...
           </span>
+          {onStop && (
+            <button
+              onClick={onStop}
+              className="flex items-center gap-1.5 rounded border border-rose-300/20 bg-rose-400/10 px-2 py-1 text-[11px] font-semibold text-rose-200 transition hover:bg-rose-400/20"
+              title="Stop execution"
+            >
+              <Square className="h-3 w-3 fill-current" />
+              Stop
+            </button>
+          )}
         </div>
         <div className="flex flex-1 items-center justify-center">
           <div className="flex items-center gap-3 text-sm text-slate-500">
@@ -63,6 +74,7 @@ export default function OutputPanel({ result, running, onClear }: OutputPanelPro
   }
 
   const isError = ["compile_error", "runtime_error", "timeout", "execution_error", "memory_limit", "unavailable"].includes(result.status);
+  const isCancelled = result.status === "cancelled";
   const isSuccess = result.status === "success";
 
   return (
@@ -71,9 +83,11 @@ export default function OutputPanel({ result, running, onClear }: OutputPanelPro
         <span className="flex items-center gap-2 text-xs font-semibold">
           {isSuccess && <Check className="h-3.5 w-3.5 text-emerald-400" />}
           {isError && <XCircle className="h-3.5 w-3.5 text-rose-400" />}
-          {!isSuccess && !isError && <Terminal className="h-3.5 w-3.5 text-slate-400" />}
-          <span className={clsx(isSuccess ? "text-emerald-300" : isError ? "text-rose-300" : "text-slate-300")}>
+          {isCancelled && <Square className="h-3.5 w-3.5 text-amber-300" />}
+          {!isSuccess && !isError && !isCancelled && <Terminal className="h-3.5 w-3.5 text-slate-400" />}
+          <span className={clsx(isSuccess ? "text-emerald-300" : isError ? "text-rose-300" : isCancelled ? "text-amber-300" : "text-slate-300")}>
             {result.status === "success" && "✓ Finished"}
+            {result.status === "cancelled" && "■ Stopped"}
             {result.status === "compile_error" && "❌ Compilation Error"}
             {result.status === "runtime_error" && "❌ Runtime Error"}
             {result.status === "timeout" && "⏱ Timeout"}

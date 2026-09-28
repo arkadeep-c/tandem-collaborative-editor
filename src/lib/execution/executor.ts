@@ -35,6 +35,14 @@ export const JAVA_VM_ARGS = [
   "-Djava.io.tmpdir=.",
 ] as const;
 export const JAVAC_VM_ARGS = JAVA_VM_ARGS.map((arg) => `-J${arg}`);
+export const JAVA_SOURCE_FILENAME = "Main.java";
+export const JAVA_MAIN_CLASS = "Main";
+
+export function createDockerContainerName(workDir: string): string {
+  const baseName = workDir.split(/[\\/]/).pop() || "exec";
+  const safeName = baseName.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  return /^[a-zA-Z0-9]/.test(safeName) ? safeName : `tandem-${safeName}`;
+}
 
 export function createDockerWorkspaceMount(workDir: string): string {
   return `${workDir}:/workspace:rw`;
@@ -46,6 +54,7 @@ interface SpawnResult {
   exitCode: number | null;
   timedOut: boolean;
   outputTruncated: boolean;
+  aborted?: boolean;
   spawnError?: string;
 }
 
@@ -59,6 +68,8 @@ interface SpawnOptions {
   cwd: string;
   stdin?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
+  cleanupAfterKill?: () => Promise<void> | void;
 }
 
 export interface DockerImageToolProbeBackend {
@@ -101,6 +112,10 @@ function unavailable(message: string, start = Date.now()): ExecutionResult {
   return baseResult("unavailable", message, Date.now() - start);
 }
 
+function cancelled(start = Date.now()): ExecutionResult {
+  return baseResult("cancelled", "Execution stopped by user.", Date.now() - start);
+}
+
 function cleanOutput(text: string, workDir: string): string {
   return text
     .replaceAll(`${workDir}/`, "")
@@ -118,12 +133,35 @@ async function commandExists(command: string): Promise<boolean> {
 
 async function rawSpawn(command: string, args: string[], options: SpawnOptions): Promise<SpawnResult> {
   return new Promise((resolve) => {
+    if (options.signal?.aborted) {
+      resolve({
+        stdout: "",
+        stderr: "Execution stopped by user.",
+        exitCode: null,
+        timedOut: false,
+        outputTruncated: false,
+        aborted: true,
+      });
+      return;
+    }
+
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let outputTruncated = false;
+    let aborted = false;
+    let killRequested = false;
+    let settled = false;
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let cleanupPromise: Promise<void> | null = null;
+
+    const startCleanup = () => {
+      if (!options.cleanupAfterKill) return;
+      cleanupPromise = (cleanupPromise ?? Promise.resolve())
+        .then(() => options.cleanupAfterKill?.())
+        .catch(() => undefined);
+    };
 
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -140,18 +178,38 @@ async function rawSpawn(command: string, args: string[], options: SpawnOptions):
     }) as ChildProcessWithoutNullStreams;
 
     const killChild = () => {
+      if (killRequested) return;
+      killRequested = true;
       try {
         if (platform() !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
         else child.kill("SIGKILL");
       } catch {
         try { child.kill("SIGKILL"); } catch {}
       }
+      startCleanup();
+    };
+
+    const finish = (result: SpawnResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (killRequested) startCleanup();
+      void (cleanupPromise ?? Promise.resolve()).finally(() => resolve(result));
+    };
+
+    const onAbort = () => {
+      aborted = true;
+      if (!stderr) stderr = "Execution stopped by user.";
+      killChild();
     };
 
     const timeout = setTimeout(() => {
       timedOut = true;
       killChild();
     }, options.timeoutMs || TIMEOUT_MS);
+
+    options.signal?.addEventListener("abort", onAbort, { once: true });
 
     const append = (target: "stdout" | "stderr", chunk: Buffer) => {
       if (outputTruncated) return;
@@ -182,13 +240,19 @@ async function rawSpawn(command: string, args: string[], options: SpawnOptions):
     child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
 
     child.on("error", (err) => {
-      clearTimeout(timeout);
-      resolve({ stdout, stderr, exitCode: null, timedOut: false, outputTruncated, spawnError: err.message });
+      finish({
+        stdout,
+        stderr,
+        exitCode: null,
+        timedOut: false,
+        outputTruncated,
+        aborted,
+        spawnError: aborted ? "Execution stopped by user." : err.message,
+      });
     });
 
     child.on("close", (code) => {
-      clearTimeout(timeout);
-      resolve({ stdout, stderr, exitCode: code, timedOut, outputTruncated });
+      finish({ stdout, stderr, exitCode: code, timedOut, outputTruncated, aborted });
     });
 
     if (options.stdin) {
@@ -197,6 +261,7 @@ async function rawSpawn(command: string, args: string[], options: SpawnOptions):
     try { child.stdin.end(); } catch {}
   });
 }
+
 
 class LinuxNamespaceBackend implements SandboxBackend {
   readonly name = "linux-namespace" as const;
@@ -259,9 +324,12 @@ class DockerBackend implements SandboxBackend {
       "umask 077",
       "exec \"$@\"",
     ].join("; ");
+    const containerName = createDockerContainerName(options.cwd);
     const dockerArgs = [
       "run",
       "--rm",
+      "--name",
+      containerName,
       "--network",
       "none",
       "--cpus",
@@ -294,7 +362,15 @@ class DockerBackend implements SandboxBackend {
       command,
       ...args,
     ];
-    return rawSpawn("docker", dockerArgs, options);
+    return rawSpawn("docker", dockerArgs, {
+      ...options,
+      cleanupAfterKill: async () => {
+        await rawSpawn("docker", ["rm", "-f", containerName], {
+          cwd: tmpdir(),
+          timeoutMs: 5000,
+        });
+      },
+    });
   }
 }
 
@@ -662,7 +738,16 @@ function isMemoryLimit(result: SpawnResult): boolean {
   return /out of memory|cannot allocate memory|memory exhausted|memory limit|std::bad_alloc/i.test(result.stderr);
 }
 
+function statusFromCompile(result: SpawnResult): ExecutionResult["status"] {
+  if (result.aborted) return "cancelled";
+  if (result.timedOut) return "timeout";
+  if (result.outputTruncated) return "output_limit";
+  if (isMemoryLimit(result)) return "memory_limit";
+  return "compile_error";
+}
+
 function statusFromRun(result: SpawnResult): ExecutionResult["status"] {
+  if (result.aborted) return "cancelled";
   if (result.timedOut) return "timeout";
   if (result.outputTruncated) return "output_limit";
   if (isMemoryLimit(result)) return "memory_limit";
@@ -679,7 +764,20 @@ function cleanSpawnResult(result: SpawnResult, workDir: string): SpawnResult {
   if (isMemoryLimit(cleaned)) {
     cleaned.stderr = "Execution exceeded the sandbox memory limit.";
   }
+  if (cleaned.aborted && !cleaned.stderr) {
+    cleaned.stderr = "Execution stopped by user.";
+  }
   return cleaned;
+}
+
+export async function prepareJavaWorkspace(workDir: string, code: string): Promise<void> {
+  const entries = await fs.readdir(workDir).catch(() => []);
+  await Promise.all(
+    entries
+      .filter((entry) => /\.(?:java|class)$/i.test(entry))
+      .map((entry) => fs.rm(join(workDir, entry), { force: true, recursive: false }).catch(() => undefined)),
+  );
+  await fs.writeFile(join(workDir, JAVA_SOURCE_FILENAME), code, "utf8");
 }
 
 async function compileTypescript(code: string, workDir: string): Promise<{ ok: true; js: string } | { ok: false; stderr: string; problems: ExecutionProblem[] }> {
@@ -726,8 +824,11 @@ export async function executeCode(
   language: ExecutionLanguage,
   code: string,
   stdin?: string,
+  signal?: AbortSignal,
 ): Promise<ExecutionResult> {
   const start = Date.now();
+
+  if (signal?.aborted) return cancelled(start);
 
   if (code.length > MAX_CODE_SIZE) {
     return baseResult("execution_error", `Code too large: ${code.length} bytes exceeds ${MAX_CODE_SIZE} limit`, 0);
@@ -747,9 +848,9 @@ export async function executeCode(
   await fs.mkdir(workDir, { recursive: true, mode: 0o700 });
 
   const run = async (command: string, args: string[], timeoutMs = TIMEOUT_MS) =>
-    cleanSpawnResult(await backend.run(command, args, { cwd: workDir, stdin, timeoutMs }), workDir);
+    cleanSpawnResult(await backend.run(command, args, { cwd: workDir, stdin, timeoutMs, signal }), workDir);
   const compile = async (command: string, args: string[], timeoutMs = COMPILE_TIMEOUT_MS) =>
-    cleanSpawnResult(await backend.run(command, args, { cwd: workDir, timeoutMs }), workDir);
+    cleanSpawnResult(await backend.run(command, args, { cwd: workDir, timeoutMs, signal }), workDir);
 
   try {
     switch (language) {
@@ -818,10 +919,10 @@ export async function executeCode(
         const filename = "main.c";
         await fs.writeFile(join(workDir, filename), code, "utf8");
         const compiled = await compile("gcc", [filename, "-o", "main", "-lm"]);
-        if (compiled.exitCode !== 0 || compiled.spawnError) {
+        if (compiled.exitCode !== 0 || compiled.spawnError || compiled.aborted || compiled.timedOut || compiled.outputTruncated) {
           const stderr = compiled.spawnError ? "C compiler is unavailable in the execution sandbox." : compiled.stderr;
           return {
-            status: compiled.spawnError ? "unavailable" : "compile_error",
+            status: compiled.spawnError ? "unavailable" : statusFromCompile(compiled),
             stdout: "",
             stderr,
             exitCode: compiled.exitCode,
@@ -847,10 +948,10 @@ export async function executeCode(
         const filename = "main.cpp";
         await fs.writeFile(join(workDir, filename), code, "utf8");
         const compiled = await compile("g++", [filename, "-o", "main", "-std=c++17"]);
-        if (compiled.exitCode !== 0 || compiled.spawnError) {
+        if (compiled.exitCode !== 0 || compiled.spawnError || compiled.aborted || compiled.timedOut || compiled.outputTruncated) {
           const stderr = compiled.spawnError ? "C++ compiler is unavailable in the execution sandbox." : compiled.stderr;
           return {
-            status: compiled.spawnError ? "unavailable" : "compile_error",
+            status: compiled.spawnError ? "unavailable" : statusFromCompile(compiled),
             stdout: "",
             stderr,
             exitCode: compiled.exitCode,
@@ -873,18 +974,12 @@ export async function executeCode(
       }
 
       case "java": {
-        const filename = "Main.java";
-        await fs.writeFile(join(workDir, filename), code, "utf8");
+        const filename = JAVA_SOURCE_FILENAME;
+        await prepareJavaWorkspace(workDir, code);
         const compiled = await compile("javac", [...JAVAC_VM_ARGS, filename]);
-        if (compiled.exitCode !== 0 || compiled.spawnError || compiled.timedOut || compiled.outputTruncated) {
+        if (compiled.exitCode !== 0 || compiled.spawnError || compiled.aborted || compiled.timedOut || compiled.outputTruncated) {
           const stderr = compiled.spawnError ? "Java compiler is unavailable in the execution sandbox." : compiled.stderr;
-          const status = compiled.spawnError
-            ? "unavailable"
-            : compiled.timedOut
-              ? "timeout"
-              : compiled.outputTruncated
-                ? "output_limit"
-                : "compile_error";
+          const status = compiled.spawnError ? "unavailable" : statusFromCompile(compiled);
           return {
             status,
             stdout: "",
@@ -897,7 +992,7 @@ export async function executeCode(
             outputTruncated: compiled.outputTruncated,
           };
         }
-        const result = await run("java", [...JAVA_VM_ARGS, "Main"]);
+        const result = await run("java", [...JAVA_VM_ARGS, JAVA_MAIN_CLASS]);
         return {
           status: statusFromRun(result),
           stdout: result.stdout,

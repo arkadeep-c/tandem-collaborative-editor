@@ -68,7 +68,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   }
 
   try {
-    const result = await executeCode(language, sourceCode, stdin);
+    const result = await executeCode(language, sourceCode, stdin, request.signal);
     return NextResponse.json(result);
   } catch (err) {
     console.error("[execute] error", err);

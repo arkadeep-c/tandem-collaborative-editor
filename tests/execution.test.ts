@@ -1,11 +1,18 @@
+import { promises as fs } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { describe, expect, it } from "vitest";
 import {
+  createDockerContainerName,
   createDockerWorkspaceMount,
   executeCode,
   getExecutionAvailability,
   getHostExecutionPath,
   JAVAC_VM_ARGS,
+  JAVA_MAIN_CLASS,
+  JAVA_SOURCE_FILENAME,
   JAVA_VM_ARGS,
+  prepareJavaWorkspace,
   parseBashErrors,
   parseCppErrors,
   parseJavaErrors,
@@ -13,10 +20,23 @@ import {
   parseJsErrors,
   parsePythonErrors,
 } from "@/lib/execution/executor";
-import { EXECUTABLE_LANGUAGES, isExecutionLanguage, LANGUAGE_CONFIG } from "@/lib/execution/types";
+import { EXECUTABLE_LANGUAGES, isExecutionLanguage, LANGUAGE_CONFIG, type ExecutionLanguage } from "@/lib/execution/types";
 import { LANGUAGE_OPTIONS } from "@/lib/types";
 
 let cachedJavaAvailability: Promise<{ ready: boolean; reason?: string }> | null = null;
+let cachedDockerReady: Promise<boolean> | null = null;
+
+async function dockerExecutionReady(): Promise<boolean> {
+  cachedDockerReady ??= getExecutionAvailability().then(
+    (availability) => availability.backend === "docker" && EXECUTABLE_LANGUAGES.every((language) => availability.languages[language].ready),
+  );
+  return cachedDockerReady;
+}
+
+async function runDockerWhenReady(language: ExecutionLanguage, code: string, stdin?: string) {
+  if (!(await dockerExecutionReady())) return { skipped: true as const };
+  return { skipped: false as const, result: await executeCode(language, code, stdin) };
+}
 
 async function javaAvailability(): Promise<{ ready: boolean; reason?: string }> {
   cachedJavaAvailability ??= getExecutionAvailability().then((availability) => availability.languages.java);
@@ -72,6 +92,11 @@ describe("Docker execution readiness", () => {
     expect(mount.endsWith(":/workspace:rw")).toBe(true);
   });
 
+  it("derives a stable Docker container name from the isolated workspace", () => {
+    expect(createDockerContainerName("C:\\Users\\Ada\\AppData\\Local\\Temp\\tandem-exec-1234")).toBe("tandem-exec-1234");
+    expect(createDockerContainerName("/tmp/tandem-exec-abcd1234")).toBe("tandem-exec-abcd1234");
+  });
+
   it("checks language runtimes inside the Docker image instead of on the host", async () => {
     const previousBackend = process.env.TANDEM_EXECUTION_BACKEND;
     const previousImage = process.env.TANDEM_EXECUTION_IMAGE;
@@ -125,6 +150,27 @@ describe("Java sandbox configuration", () => {
       "-Djava.io.tmpdir=.",
     ]));
     expect(JAVAC_VM_ARGS).toEqual(JAVA_VM_ARGS.map((arg) => `-J${arg}`));
+  });
+
+  it("always prepares Java source as Main.java and removes stale Java artifacts", async () => {
+    const workDir = await fs.mkdtemp(join(tmpdir(), "tandem-java-test-"));
+    try {
+      await fs.writeFile(join(workDir, "test.java"), "public class test {}", "utf8");
+      await fs.writeFile(join(workDir, "test.class"), "stale", "utf8");
+      await fs.writeFile(join(workDir, "Main.class"), "stale", "utf8");
+      const source = "public class Main { public static void main(String[] args) {} }";
+
+      await prepareJavaWorkspace(workDir, source);
+
+      expect(JAVA_SOURCE_FILENAME).toBe("Main.java");
+      expect(JAVA_MAIN_CLASS).toBe("Main");
+      expect(await fs.readFile(join(workDir, "Main.java"), "utf8")).toBe(source);
+      await expect(fs.access(join(workDir, "test.java"))).rejects.toThrow();
+      await expect(fs.access(join(workDir, "test.class"))).rejects.toThrow();
+      await expect(fs.access(join(workDir, "Main.class"))).rejects.toThrow();
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -294,6 +340,172 @@ public class Main {
     expect(execution.result.status).toBe("timeout");
     expect(execution.result.timedOut).toBe(true);
   }, 25_000);
+});
+
+describe("Docker-backed execution integration", () => {
+  it("executes stdin arithmetic for every executable language when Docker is configured", async () => {
+    const cases: Array<[ExecutionLanguage, string, string]> = [
+      ["c", `#include <stdio.h>
+int main(void) { int a, b; if (scanf("%d %d", &a, &b) != 2) return 2; printf("%d\\n", a + b); return 0; }
+`, "10\n25\n"],
+      ["cpp", `#include <iostream>
+int main() { int a, b; if (!(std::cin >> a >> b)) return 2; std::cout << (a + b) << std::endl; return 0; }
+`, "10\n25\n"],
+      ["java", `import java.util.*;
+public class Main { public static void main(String[] args) { Scanner sc = new Scanner(System.in); int a = sc.nextInt(); int b = sc.nextInt(); System.out.println(a + b); } }
+`, "10\n25\n"],
+      ["python", `a = int(input())
+b = int(input())
+print(a + b)
+`, "10\n25\n"],
+      ["javascript", `const fs = require("fs");
+const [a, b] = fs.readFileSync(0, "utf8").trim().split(/\s+/).map(Number);
+console.log(a + b);
+`, "10\n25\n"],
+      ["typescript", `const fs = require("fs");
+const [a, b] = fs.readFileSync(0, "utf8").trim().split(/\s+/).map(Number);
+console.log(a + b);
+`, "10\n25\n"],
+      ["bash", `read a
+read b
+echo $((a + b))
+`, "10\n25\n"],
+    ];
+
+    if (!(await dockerExecutionReady())) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    for (const [language, code, stdin] of cases) {
+      const execution = await runDockerWhenReady(language, code, stdin);
+      expect(execution.skipped).toBe(false);
+      if (!execution.skipped) {
+        expect(execution.result.status, language).toBe("success");
+        expect(execution.result.stdout.trim(), language).toBe("35");
+        expect(execution.result.stderr, language).toBe("");
+        expect(execution.result.exitCode, language).toBe(0);
+      }
+    }
+  }, 90_000);
+
+  it("keeps stdout, stderr, and non-zero exit code separate when Docker is configured", async () => {
+    const execution = await runDockerWhenReady("python", `import sys
+print("stdout-test")
+print("stderr-test", file=sys.stderr)
+sys.exit(7)
+`);
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+    expect(execution.result.status).toBe("runtime_error");
+    expect(execution.result.stdout.trim()).toBe("stdout-test");
+    expect(execution.result.stderr.trim()).toBe("stderr-test");
+    expect(execution.result.exitCode).toBe(7);
+  }, 20_000);
+
+  it("enforces timeout and recovers for the next Docker execution", async () => {
+    const timedOut = await runDockerWhenReady("javascript", "while (true) {}\n");
+    if (timedOut.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+    expect(timedOut.result.status).toBe("timeout");
+    expect(timedOut.result.timedOut).toBe(true);
+
+    const recovered = await runDockerWhenReady("javascript", "console.log('after-timeout');\n");
+    expect(recovered.skipped).toBe(false);
+    if (!recovered.skipped) {
+      expect(recovered.result.status).toBe("success");
+      expect(recovered.result.stdout.trim()).toBe("after-timeout");
+    }
+  }, 35_000);
+
+  it("enforces output limits and recovers for the next Docker execution", async () => {
+    const limited = await runDockerWhenReady("python", "while True:\n    print('x' * 1000)\n");
+    if (limited.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+    expect(limited.result.status).toBe("output_limit");
+    expect(limited.result.outputTruncated).toBe(true);
+    expect(limited.result.stdout).toContain("[Output truncated: exceeded 1MB limit]");
+
+    const recovered = await runDockerWhenReady("python", "print('after-output-limit')\n");
+    expect(recovered.skipped).toBe(false);
+    if (!recovered.skipped) {
+      expect(recovered.result.status).toBe("success");
+      expect(recovered.result.stdout.trim()).toBe("after-output-limit");
+    }
+  }, 35_000);
+
+  it("isolates repeated and parallel Docker executions", async () => {
+    if (!(await dockerExecutionReady())) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    for (let index = 0; index < 10; index += 1) {
+      const result = await executeCode("python", "import sys\nprint(sys.stdin.read().strip())\n", `run-${index}\n`);
+      expect(result.status).toBe("success");
+      expect(result.stdout.trim()).toBe(`run-${index}`);
+      expect(result.stderr).toBe("");
+    }
+
+    const [left, right] = await Promise.all([
+      executeCode("python", "print('parallel-left')\n"),
+      executeCode("bash", "echo parallel-right\n"),
+    ]);
+    expect(left.status).toBe("success");
+    expect(right.status).toBe("success");
+    expect(left.stdout.trim()).toBe("parallel-left");
+    expect(right.stdout.trim()).toBe("parallel-right");
+  }, 90_000);
+
+  it("keeps Docker networking disabled and root filesystem read-only", async () => {
+    const network = await runDockerWhenReady("python", `import socket
+sock = socket.socket()
+sock.settimeout(1)
+try:
+    sock.connect(("1.1.1.1", 80))
+except OSError as exc:
+    print(type(exc).__name__)
+else:
+    raise SystemExit(9)
+`);
+    if (network.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+    expect(network.result.status).toBe("success");
+    expect(network.result.stdout.trim()).toMatch(/OSError|TimeoutError|PermissionError/);
+
+    const filesystem = await runDockerWhenReady("python", `from pathlib import Path
+try:
+    Path('/root/tandem-write-test').write_text('x')
+except OSError as exc:
+    print(type(exc).__name__)
+else:
+    raise SystemExit(9)
+`);
+    expect(filesystem.skipped).toBe(false);
+    if (!filesystem.skipped) {
+      expect(filesystem.result.status).toBe("success");
+      expect(filesystem.result.stdout.trim()).toMatch(/OSError|PermissionError/);
+    }
+  }, 30_000);
+});
+
+describe("execution cancellation", () => {
+  it("returns a cancelled result when the request is aborted before execution starts", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await executeCode("python", "print('nope')", undefined, controller.signal);
+    expect(result.status).toBe("cancelled");
+    expect(result.stderr).toBe("Execution stopped by user.");
+    expect(result.exitCode).toBeNull();
+  });
 });
 
 describe("execution fail-closed mode", () => {

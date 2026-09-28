@@ -16,6 +16,7 @@ import {
   LogOut,
   MoreVertical,
   Play,
+  Square,
   Download,
   Settings,
   Unlock,
@@ -84,6 +85,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
+  const executionAbortRef = useRef<AbortController | null>(null);
 
   const { state, setBridge, submitLocalOps, publishPresence, updateMeta } =
     useCollaborativeDocument(room.code);
@@ -244,6 +246,23 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     setBottomOpen(!(hasResultPane && viewMode !== "edit"));
   }, [hasResultPane, viewMode]);
 
+  const stopExecution = useCallback(() => {
+    const controller = executionAbortRef.current;
+    if (!controller || controller.signal.aborted) return;
+    controller.abort();
+    setRunning(false);
+    setProblemMarkers([]);
+    openPanelSurface("output");
+    setExecutionResult({
+      status: "cancelled",
+      stdout: "",
+      stderr: "Execution stopped by user.",
+      exitCode: null,
+      duration: 0,
+      problems: [],
+    });
+  }, [openPanelSurface, setProblemMarkers]);
+
   const runCode = useCallback(async () => {
     if (running) return;
     if (isExecutable && currentExecutionAvailability?.ready === false) {
@@ -263,6 +282,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     const code = getCurrentContent();
     if (!code.trim()) return;
 
+    const controller = new AbortController();
+    executionAbortRef.current = controller;
     setRunning(true);
     openPanelSurface("output");
     setExecutionResult(null);
@@ -271,6 +292,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       await ensureClientSession();
       const res = await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/execute`, {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           language: state.language,
@@ -300,6 +322,18 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         }
       }
     } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        setExecutionResult({
+          status: "cancelled",
+          stdout: "",
+          stderr: "Execution stopped by user.",
+          exitCode: null,
+          duration: 0,
+          problems: [],
+        });
+        setProblemMarkers([]);
+        return;
+      }
       setExecutionResult({
         status: "execution_error",
         stdout: "",
@@ -309,9 +343,16 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         problems: [],
       });
     } finally {
+      if (executionAbortRef.current === controller) {
+        executionAbortRef.current = null;
+      }
       setRunning(false);
     }
   }, [currentExecutionAvailability, executionUnavailableMessage, getCurrentContent, isExecutable, openPanelSurface, running, room.code, setProblemMarkers, state.language, stdin]);
+
+  useEffect(() => () => {
+    executionAbortRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     const handleRun = () => {
@@ -534,6 +575,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             result={executionResult}
             running={running}
             onClear={() => setExecutionResult(null)}
+            onStop={stopExecution}
           />
         )}
         {bottomTab === "problems" && (
@@ -669,13 +711,15 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           <div className="flex items-center gap-1">
             {isExecutable && (
               <button
-                onClick={() => void runCode()}
-                disabled={running}
-                className="flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-400 disabled:opacity-50"
-                title={currentExecutionAvailability?.ready === false ? currentExecutionAvailability.reason : "Run code (Ctrl+Enter)"}
+                onClick={running ? stopExecution : () => void runCode()}
+                className={clsx(
+                  "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition",
+                  running ? "bg-rose-500 hover:bg-rose-400" : "bg-emerald-500 hover:bg-emerald-400",
+                )}
+                title={running ? "Stop execution" : currentExecutionAvailability?.ready === false ? currentExecutionAvailability.reason : "Run code (Ctrl+Enter)"}
               >
-                {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                Run
+                {running ? <Square className="h-3.5 w-3.5 fill-current" /> : <Play className="h-3.5 w-3.5" />}
+                {running ? "Stop" : "Run"}
               </button>
             )}
             {isExecutable && currentExecutionAvailability && (

@@ -17,6 +17,7 @@ export type ExecutionStatus =
   | "success"
   | "compile_error"
   | "runtime_error"
+  | "cancelled"
   | "timeout"
   | "output_limit"
   | "memory_limit"
