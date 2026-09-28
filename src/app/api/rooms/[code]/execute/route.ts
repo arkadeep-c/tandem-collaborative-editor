@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireRoomAccess } from "@/lib/roomAccess";
 import { getAuthenticatedSessionFromRequest } from "@/lib/session";
 import { executeCode } from "@/lib/execution/executor";
+import { EXECUTABLE_LANGUAGES, isExecutionLanguage } from "@/lib/execution/types";
 import { isLanguageId } from "@/lib/validation";
 import { SlidingWindowLimiter } from "@/lib/rateLimit";
 
@@ -59,24 +60,22 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "Stdin too large (max 10KB)." }, { status: 400 });
   }
 
-  // Check if language is executable
-  const executableLanguages = ["c", "cpp", "python", "javascript", "typescript", "bash"];
-  if (!executableLanguages.includes(language)) {
+  if (!isExecutionLanguage(language)) {
     return NextResponse.json({
-      error: `Language ${language} is not executable. Supported: ${executableLanguages.join(", ")}`,
-      supported: executableLanguages,
+      error: `Language ${language} is not executable. Supported: ${EXECUTABLE_LANGUAGES.join(", ")}`,
+      supported: EXECUTABLE_LANGUAGES,
     }, { status: 400 });
   }
 
   try {
-    const result = await executeCode(language as any, sourceCode, stdin);
+    const result = await executeCode(language, sourceCode, stdin);
     return NextResponse.json(result);
   } catch (err) {
     console.error("[execute] error", err);
     return NextResponse.json({
       status: "execution_error",
       stdout: "",
-      stderr: err instanceof Error ? err.message : "Execution failed",
+      stderr: "Execution failed safely. Please try again or contact the room owner if it persists.",
       exitCode: null,
       duration: 0,
       problems: [],

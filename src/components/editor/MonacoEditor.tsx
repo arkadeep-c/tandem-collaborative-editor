@@ -65,16 +65,17 @@ export default function MonacoEditor({
   const styleTagRef = useRef<HTMLStyleElement | null>(null);
   const lastEditAtRef = useRef(0);
   const presenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const languageRef = useRef(language);
-  languageRef.current = language;
 
   /* Keep latest callbacks in refs so Monaco listeners never re-subscribe. */
   const submitLocalOpsRef = useRef(submitLocalOps);
-  submitLocalOpsRef.current = submitLocalOps;
   const publishPresenceRef = useRef(publishPresence);
-  publishPresenceRef.current = publishPresence;
   const onMirrorRef = useRef(onMirror);
-  onMirrorRef.current = onMirror;
+
+  useEffect(() => {
+    submitLocalOpsRef.current = submitLocalOps;
+    publishPresenceRef.current = publishPresence;
+    onMirrorRef.current = onMirror;
+  }, [submitLocalOps, publishPresence, onMirror]);
 
   /* ---------------------------------------------------------------- */
   /* Theme                                                             */
@@ -187,10 +188,12 @@ export default function MonacoEditor({
       ed.onDidChangeModelContent(() => {
         onMirrorRef.current?.(ed.getModel()?.getValue() ?? "");
       });
-      // Keyboard shortcut Ctrl+Enter to run code
+      // Keyboard shortcuts that should stay inside the editor/workspace.
       ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
-        const event = new CustomEvent("tandem-run-code");
-        window.dispatchEvent(event);
+        window.dispatchEvent(new CustomEvent("tandem-run-code"));
+      });
+      ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+        window.dispatchEvent(new CustomEvent("tandem-save-request"));
       });
       ed.focus();
     },
@@ -381,7 +384,7 @@ export default function MonacoEditor({
       loading={
         <div className="flex h-full items-center justify-center bg-[#0b0e14]">
           <div className="flex items-center gap-3 text-sm text-slate-500">
-            <span className="h-2 w-2 animate-ping rounded-full bg-violet-400" />
+            <span className="h-2 w-2 animate-ping rounded-full bg-teal-400" />
             Loading Monaco…
           </div>
         </div>
@@ -404,6 +407,8 @@ export default function MonacoEditor({
         tabSize: 2,
         insertSpaces: true,
         contextmenu: true,
+        readOnly: false,
+        domReadOnly: false,
         fixedOverflowWidgets: true,
       }}
     />

@@ -1,18 +1,14 @@
-export type ExecutionLanguage = 
-  | "c"
-  | "cpp"
-  | "python"
-  | "javascript"
-  | "typescript"
-  | "bash"
-  | "java"
-  | "go"
-  | "rust"
-  | "json"
-  | "markdown"
-  | "html"
-  | "css"
-  | "sql";
+import {
+  EXECUTABLE_LANGUAGE_IDS,
+  LANGUAGE_DEFINITION_BY_ID,
+  LANGUAGE_DEFINITIONS,
+  type LanguageId,
+} from "@/lib/languageConfig";
+
+export type ExecutionLanguage = Extract<
+  LanguageId,
+  "c" | "cpp" | "python" | "javascript" | "typescript" | "bash"
+>;
 
 export type ExecutionStatus =
   | "idle"
@@ -54,33 +50,33 @@ export interface ExecutionRequest {
   roomCode?: string;
 }
 
-export const EXECUTABLE_LANGUAGES: ExecutionLanguage[] = [
-  "c",
-  "cpp",
-  "python",
-  "javascript",
-  "typescript",
-  "bash",
-];
+export const EXECUTABLE_LANGUAGES = EXECUTABLE_LANGUAGE_IDS as ExecutionLanguage[];
 
-export const LANGUAGE_CONFIG: Record<ExecutionLanguage, { 
-  label: string; 
-  executable: boolean; 
-  extension: string;
-  needsCompilation?: boolean;
-}> = {
-  c: { label: "C", executable: true, extension: "c", needsCompilation: true },
-  cpp: { label: "C++", executable: true, extension: "cpp", needsCompilation: true },
-  python: { label: "Python", executable: true, extension: "py" },
-  javascript: { label: "JavaScript", executable: true, extension: "js" },
-  typescript: { label: "TypeScript", executable: true, extension: "ts", needsCompilation: true },
-  bash: { label: "Bash", executable: true, extension: "sh" },
-  java: { label: "Java", executable: false, extension: "java", needsCompilation: true },
-  go: { label: "Go", executable: false, extension: "go", needsCompilation: true },
-  rust: { label: "Rust", executable: false, extension: "rs", needsCompilation: true },
-  json: { label: "JSON", executable: false, extension: "json" },
-  markdown: { label: "Markdown", executable: false, extension: "md" },
-  html: { label: "HTML", executable: false, extension: "html" },
-  css: { label: "CSS", executable: false, extension: "css" },
-  sql: { label: "SQL", executable: false, extension: "sql" },
-};
+export const LANGUAGE_CONFIG = LANGUAGE_DEFINITIONS.reduce(
+  (acc, language) => {
+    acc[language.id] = {
+      label: language.label,
+      executable: language.executable,
+      extension: language.extension,
+      needsCompilation: language.needsCompilation,
+    };
+    return acc;
+  },
+  {} as Record<
+    LanguageId,
+    {
+      label: string;
+      executable: boolean;
+      extension: string;
+      needsCompilation?: boolean;
+    }
+  >,
+);
+
+export function isExecutionLanguage(language: string): language is ExecutionLanguage {
+  return (EXECUTABLE_LANGUAGES as readonly string[]).includes(language);
+}
+
+export function executionLabel(language: string): string {
+  return LANGUAGE_DEFINITION_BY_ID[language as LanguageId]?.label ?? language;
+}

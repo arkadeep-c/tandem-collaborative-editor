@@ -43,9 +43,9 @@ room.flush(debounce(5_000)); // trailing-edge write to Postgres
 
 ## Languages
 
-Switch the room language in the header — JavaScript, TypeScript, Python,
-C, C++, Java, Markdown, JSON and more. The choice syncs to every
-collaborator and persists with the document.
+Switch the room language in the header — C, C++, Python, JavaScript,
+TypeScript, Bash / Shell, Markdown, HTML, CSS, and JSON. The choice syncs
+to every collaborator and persists with the document without replacing content.
 
 *This room is public; rooms you create are private to their code holder.*
 `;
@@ -61,9 +61,9 @@ export async function ensureSeed(): Promise<void> {
     if (existing) return;
 
     if (isUsingLocalDb()) {
-      (db as any).insert(users).values({ id: SYSTEM_USER_ID, name: "Tandem Bot", color: "#8b5cf6" }).onConflictDoNothing().run();
+      (db as any).insert(users).values({ id: SYSTEM_USER_ID, name: "Tandem Bot", color: "#14b8a6" }).onConflictDoNothing().run();
     } else {
-      await (db as any).insert(users).values({ id: SYSTEM_USER_ID, name: "Tandem Bot", color: "#8b5cf6" }).onConflictDoNothing();
+      await (db as any).insert(users).values({ id: SYSTEM_USER_ID, name: "Tandem Bot", color: "#14b8a6" }).onConflictDoNothing();
     }
 
     let doc: any;

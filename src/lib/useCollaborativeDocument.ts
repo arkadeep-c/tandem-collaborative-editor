@@ -147,7 +147,9 @@ export function useCollaborativeDocument(roomCode: string) {
   }, [roomCode, patchState]);
 
   const pumpRef = useRef(pump);
-  pumpRef.current = pump;
+  useEffect(() => {
+    pumpRef.current = pump;
+  }, [pump]);
 
   const openStreamRef = useRef<() => Promise<void>>(async () => {});
 
@@ -175,6 +177,7 @@ export function useCollaborativeDocument(roomCode: string) {
             title: event.room.title,
             language: event.room.language,
             revision: event.revision,
+            syncedRevision: event.revision,
             cacheMode: event.cacheMode,
             unsent: false,
           }));
@@ -401,6 +404,8 @@ export function useCollaborativeDocument(roomCode: string) {
       );
     };
 
+    // A reconnect timer needs the latest opener without re-subscribing the stream effect.
+    // eslint-disable-next-line react-hooks/immutability
     openStreamRef.current = open;
     void open();
 

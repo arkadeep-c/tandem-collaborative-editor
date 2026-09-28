@@ -51,7 +51,7 @@ export default function ProfileDialog({ user, onClose }: ProfileDialogProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#07090f]/80 backdrop-blur-md">
       <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#10141f] p-7 shadow-2xl shadow-black/60">
-        <div className="mb-1 flex h-11 w-11 items-center justify-center rounded-xl bg-violet-500/15 text-violet-300">
+        <div className="mb-1 flex h-11 w-11 items-center justify-center rounded-xl bg-teal-500/15 text-teal-300">
           <UserRound className="h-5 w-5" />
         </div>
         <h2 className="mt-4 text-lg font-semibold text-slate-100">
@@ -68,7 +68,7 @@ export default function ProfileDialog({ user, onClose }: ProfileDialogProps) {
           onKeyDown={(event) => event.key === "Enter" && void submit()}
           placeholder="Display name"
           maxLength={40}
-          className="mt-5 w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3.5 py-2.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-violet-400/60 focus:ring-2 focus:ring-violet-400/20"
+          className="mt-5 w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3.5 py-2.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/20"
         />
 
         <div className="mt-4 flex flex-wrap gap-2">
@@ -100,7 +100,7 @@ export default function ProfileDialog({ user, onClose }: ProfileDialogProps) {
           type="button"
           disabled={saving}
           onClick={() => void submit()}
-          className="mt-6 flex w-full items-center justify-center gap-2 rounded-lg bg-violet-500 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-400 active:scale-[0.98] disabled:opacity-60"
+          className="mt-6 flex w-full items-center justify-center gap-2 rounded-lg bg-teal-500 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-400 active:scale-[0.98] disabled:opacity-60"
         >
           {saving && <Loader2 className="h-4 w-4 animate-spin" />}
           Save

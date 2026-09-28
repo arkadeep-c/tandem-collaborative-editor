@@ -93,6 +93,8 @@ export default function RoomClient({ code }: RoomClientProps) {
   }, [code]);
 
   useEffect(() => {
+    // load() is asynchronous; state updates happen after network/session work completes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load, reloadKey]);
 
@@ -105,7 +107,7 @@ export default function RoomClient({ code }: RoomClientProps) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#07090f]">
         <div className="flex items-center gap-3 text-sm text-slate-500">
-          <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
+          <Loader2 className="h-4 w-4 animate-spin text-teal-400" />
           Loading room…
         </div>
       </div>
@@ -115,7 +117,7 @@ export default function RoomClient({ code }: RoomClientProps) {
   if (status === "not-found") {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-[#07090f] px-6 text-center">
-        <p className="font-mono text-sm tracking-[0.3em] text-violet-300">
+        <p className="font-mono text-sm tracking-[0.3em] text-teal-300">
           {code || "??????"}
         </p>
         <h1 className="mt-4 text-3xl font-bold tracking-tight text-slate-50">
@@ -127,7 +129,7 @@ export default function RoomClient({ code }: RoomClientProps) {
         <div className="mt-8 flex gap-3">
           <Link
             href="/"
-            className="rounded-lg bg-violet-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-400"
+            className="rounded-lg bg-teal-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-400"
           >
             Back home
           </Link>
@@ -154,7 +156,7 @@ export default function RoomClient({ code }: RoomClientProps) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#07090f]">
       <div className="flex items-center gap-3 text-sm text-slate-500">
-        <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
+        <Loader2 className="h-4 w-4 animate-spin text-teal-400" />
         Loading…
       </div>
     </div>

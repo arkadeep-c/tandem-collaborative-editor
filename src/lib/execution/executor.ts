@@ -1,14 +1,19 @@
 import { randomBytes } from "crypto";
-import { spawn } from "child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { promises as fs } from "fs";
 import { join } from "path";
-import { tmpdir } from "os";
-import type { ExecutionLanguage, ExecutionResult, ExecutionProblem } from "./types";
+import { tmpdir, platform } from "os";
+import type { ExecutionLanguage, ExecutionProblem, ExecutionResult } from "./types";
 
-const TIMEOUT_MS = 10000; // 10 seconds
-const OUTPUT_LIMIT_BYTES = 1024 * 1024; // 1MB
-const MAX_CODE_SIZE = 100 * 1024; // 100KB
-const MAX_STDIN_SIZE = 10 * 1024; // 10KB
+const TIMEOUT_MS = 10_000;
+const COMPILE_TIMEOUT_MS = 8_000;
+const OUTPUT_LIMIT_BYTES = 1024 * 1024;
+const MAX_CODE_SIZE = 100 * 1024;
+const MAX_STDIN_SIZE = 10 * 1024;
+const MEMORY_LIMIT_BYTES = 768 * 1024 * 1024;
+const FILE_SIZE_BLOCKS = 4096; // 2MB with POSIX 512-byte blocks.
+const PROCESS_LIMIT = 96;
+const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 interface SpawnResult {
   stdout: string;
@@ -16,17 +21,58 @@ interface SpawnResult {
   exitCode: number | null;
   timedOut: boolean;
   outputTruncated: boolean;
+  spawnError?: string;
 }
 
-async function spawnWithLimits(
-  command: string,
-  args: string[],
-  options: {
-    cwd: string;
-    stdin?: string;
-    timeoutMs?: number;
-  }
-): Promise<SpawnResult> {
+interface SandboxBackend {
+  readonly name: "docker" | "linux-namespace";
+  readonly productionSafe: boolean;
+  run(command: string, args: string[], options: SpawnOptions): Promise<SpawnResult>;
+}
+
+interface SpawnOptions {
+  cwd: string;
+  stdin?: string;
+  timeoutMs?: number;
+}
+
+function baseResult(
+  status: ExecutionResult["status"],
+  stderr: string,
+  duration: number,
+  extras: Partial<ExecutionResult> = {},
+): ExecutionResult {
+  return {
+    status,
+    stdout: "",
+    stderr,
+    exitCode: null,
+    duration,
+    problems: [],
+    ...extras,
+  };
+}
+
+function unavailable(message: string, start = Date.now()): ExecutionResult {
+  return baseResult("unavailable", message, Date.now() - start);
+}
+
+function cleanOutput(text: string, workDir: string): string {
+  return text
+    .replaceAll(`${workDir}/`, "")
+    .replaceAll(workDir, "")
+    .replace(/\/tmp\/tandem-exec-[a-f0-9]+\//g, "")
+    .replace(/\\/g, "/");
+}
+
+async function commandExists(command: string): Promise<boolean> {
+  const result = platform() === "win32"
+    ? await rawSpawn("where", [command], { cwd: tmpdir(), timeoutMs: 1500 })
+    : await rawSpawn("/bin/sh", ["-lc", `command -v ${JSON.stringify(command)} >/dev/null 2>&1`], { cwd: tmpdir(), timeoutMs: 1500 });
+  return result.exitCode === 0;
+}
+
+async function rawSpawn(command: string, args: string[], options: SpawnOptions): Promise<SpawnResult> {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -38,227 +84,402 @@ async function spawnWithLimits(
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: {
-        PATH: process.env.PATH || "/usr/bin:/bin",
+        PATH: SAFE_PATH,
         HOME: options.cwd,
         TMPDIR: options.cwd,
+        TEMP: options.cwd,
+        TMP: options.cwd,
         LANG: "C.UTF-8",
       } as unknown as NodeJS.ProcessEnv,
       stdio: ["pipe", "pipe", "pipe"],
-    });
+      detached: platform() !== "win32",
+    }) as ChildProcessWithoutNullStreams;
+
+    const killChild = () => {
+      try {
+        if (platform() !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        try { child.kill("SIGKILL"); } catch {}
+      }
+    };
 
     const timeout = setTimeout(() => {
       timedOut = true;
-      try {
-        child.kill("SIGKILL");
-      } catch {}
+      killChild();
     }, options.timeoutMs || TIMEOUT_MS);
 
-    child.stdout.on("data", (chunk: Buffer) => {
+    const append = (target: "stdout" | "stderr", chunk: Buffer) => {
       if (outputTruncated) return;
-      stdoutBytes += chunk.length;
-      if (stdoutBytes > OUTPUT_LIMIT_BYTES) {
-        outputTruncated = true;
-        stdout += chunk.toString("utf8", 0, OUTPUT_LIMIT_BYTES - stdoutBytes + chunk.length);
-        stdout += "\n[Output truncated: exceeded 1MB limit]";
-        try { child.kill("SIGKILL"); } catch {}
-        return;
+      if (target === "stdout") {
+        stdoutBytes += chunk.length;
+        if (stdoutBytes > OUTPUT_LIMIT_BYTES) {
+          outputTruncated = true;
+          stdout += chunk.toString("utf8", 0, OUTPUT_LIMIT_BYTES - stdoutBytes + chunk.length);
+          stdout += "\n[Output truncated: exceeded 1MB limit]";
+          killChild();
+          return;
+        }
+        stdout += chunk.toString("utf8");
+      } else {
+        stderrBytes += chunk.length;
+        if (stderrBytes > OUTPUT_LIMIT_BYTES) {
+          outputTruncated = true;
+          stderr += chunk.toString("utf8", 0, OUTPUT_LIMIT_BYTES - stderrBytes + chunk.length);
+          stderr += "\n[Output truncated: exceeded 1MB limit]";
+          killChild();
+          return;
+        }
+        stderr += chunk.toString("utf8");
       }
-      stdout += chunk.toString("utf8");
-    });
+    };
 
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (outputTruncated) return;
-      stderrBytes += chunk.length;
-      if (stderrBytes > OUTPUT_LIMIT_BYTES) {
-        outputTruncated = true;
-        stderr += chunk.toString("utf8", 0, OUTPUT_LIMIT_BYTES - stderrBytes + chunk.length);
-        stderr += "\n[Output truncated: exceeded 1MB limit]";
-        try { child.kill("SIGKILL"); } catch {}
-        return;
-      }
-      stderr += chunk.toString("utf8");
-    });
+    child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
 
     child.on("error", (err) => {
       clearTimeout(timeout);
-      resolve({
-        stdout,
-        stderr: stderr + `\nSpawn error: ${err.message}`,
-        exitCode: null,
-        timedOut: false,
-        outputTruncated,
-      });
+      resolve({ stdout, stderr, exitCode: null, timedOut: false, outputTruncated, spawnError: err.message });
     });
 
     child.on("close", (code) => {
       clearTimeout(timeout);
-      resolve({
-        stdout,
-        stderr,
-        exitCode: code,
-        timedOut,
-        outputTruncated,
-      });
+      resolve({ stdout, stderr, exitCode: code, timedOut, outputTruncated });
     });
 
     if (options.stdin) {
-      try {
-        child.stdin.write(options.stdin);
-      } catch {}
+      try { child.stdin.write(options.stdin); } catch {}
     }
-    try {
-      child.stdin.end();
-    } catch {}
+    try { child.stdin.end(); } catch {}
   });
 }
 
-function parseCppErrors(stderr: string, filename: string): ExecutionProblem[] {
+class LinuxNamespaceBackend implements SandboxBackend {
+  readonly name = "linux-namespace" as const;
+  readonly productionSafe = false;
+
+  async run(command: string, args: string[], options: SpawnOptions): Promise<SpawnResult> {
+    const repoRoot = process.cwd();
+    const script = [
+      "cd \"$TANDEM_WORKDIR\" || exit 111",
+      `ulimit -t ${Math.ceil((options.timeoutMs || TIMEOUT_MS) / 1000) + 1}`,
+      `ulimit -f ${FILE_SIZE_BLOCKS}`,
+      `ulimit -v ${Math.floor(MEMORY_LIMIT_BYTES / 1024)}`,
+      `ulimit -u ${PROCESS_LIMIT}`,
+      "umask 077",
+      `mount -t tmpfs -o size=1m tmpfs ${JSON.stringify(repoRoot)} 2>/dev/null || true`,
+      "exec \"$@\"",
+    ].join("; ");
+
+    const unshareArgs = [
+      "--user",
+      "--map-root-user",
+      "--net",
+      "--pid",
+      "--mount",
+      "--fork",
+      "/usr/bin/env",
+      "-i",
+      `PATH=${SAFE_PATH}`,
+      `HOME=${options.cwd}`,
+      `TMPDIR=${options.cwd}`,
+      `TEMP=${options.cwd}`,
+      `TMP=${options.cwd}`,
+      `TANDEM_WORKDIR=${options.cwd}`,
+      "LANG=C.UTF-8",
+      "/bin/bash",
+      "-lc",
+      script,
+      "sandbox",
+      command,
+      ...args,
+    ];
+    return rawSpawn("unshare", unshareArgs, options);
+  }
+}
+
+class DockerBackend implements SandboxBackend {
+  readonly name = "docker" as const;
+  readonly productionSafe = true;
+
+  constructor(private readonly image: string) {}
+
+  async run(command: string, args: string[], options: SpawnOptions): Promise<SpawnResult> {
+    await fs.chmod(options.cwd, 0o777).catch(() => undefined);
+    const script = [
+      "cd /workspace || exit 111",
+      `ulimit -t ${Math.ceil((options.timeoutMs || TIMEOUT_MS) / 1000) + 1}`,
+      `ulimit -f ${FILE_SIZE_BLOCKS}`,
+      `ulimit -v ${Math.floor(MEMORY_LIMIT_BYTES / 1024)}`,
+      `ulimit -u ${PROCESS_LIMIT}`,
+      "umask 077",
+      "exec \"$@\"",
+    ].join("; ");
+    const dockerArgs = [
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--cpus",
+      "0.5",
+      "--memory",
+      String(MEMORY_LIMIT_BYTES),
+      "--pids-limit",
+      String(PROCESS_LIMIT),
+      "--read-only",
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,size=16m",
+      "-v",
+      `${options.cwd}:/workspace:rw,nosuid`,
+      "-w",
+      "/workspace",
+      "--user",
+      "65534:65534",
+      "--entrypoint",
+      "/usr/bin/env",
+      this.image,
+      "-i",
+      `PATH=${SAFE_PATH}`,
+      "HOME=/workspace",
+      "TMPDIR=/workspace",
+      "LANG=C.UTF-8",
+      "/bin/bash",
+      "-lc",
+      script,
+      "sandbox",
+      command,
+      ...args,
+    ];
+    return rawSpawn("docker", dockerArgs, options);
+  }
+}
+
+async function resolveBackend(): Promise<SandboxBackend | null> {
+  const requested = (process.env.TANDEM_EXECUTION_BACKEND || "auto").toLowerCase();
+  if (requested === "disabled" || requested === "none") return null;
+
+  const image = process.env.TANDEM_EXECUTION_IMAGE;
+  if ((requested === "docker" || (requested === "auto" && image)) && image) {
+    if (await commandExists("docker")) return new DockerBackend(image);
+    return null;
+  }
+
+  const allowNamespace =
+    requested === "linux-namespace" ||
+    process.env.APP_ENV === "preview" ||
+    process.env.USE_LOCAL_DEV_DB === "true" ||
+    process.env.TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR === "true" ||
+    process.env.NODE_ENV !== "production";
+
+  if (platform() === "linux" && allowNamespace && await commandExists("unshare")) {
+    return new LinuxNamespaceBackend();
+  }
+
+  return null;
+}
+
+function backendUnavailableMessage(): string {
+  return "Code execution is unavailable because no supported isolated execution runtime is configured. Configure a Linux Docker sandbox image with TANDEM_EXECUTION_IMAGE, or use the documented Linux/WSL development sandbox. Unsafe host execution is disabled.";
+}
+
+async function requireTools(language: ExecutionLanguage, backend: SandboxBackend): Promise<string | null> {
+  if (backend.name === "docker") return null;
+  const tools: Record<ExecutionLanguage, string[]> = {
+    c: ["gcc"],
+    cpp: ["g++"],
+    python: ["python3"],
+    javascript: ["node"],
+    typescript: ["node"],
+    bash: ["bash"],
+  };
+  for (const tool of tools[language]) {
+    if (!(await commandExists(tool))) {
+      return `Code execution is unavailable because the ${tool} runtime is missing from the configured sandbox environment.`;
+    }
+  }
+  return null;
+}
+
+export function parseCppErrors(stderr: string, filename: string): ExecutionProblem[] {
   const problems: ExecutionProblem[] = [];
-  // Example: main.cpp:12:9: error: 'cout' was not declared in this scope
-  const regex = /^(.*):(\d+):(\d+):\s*(error|warning|note):\s*(.*)$/gm;
-  let match;
+  const regex = /^(.*?):(\d+):(\d+):\s*(fatal error|error|warning|note):\s*(.*)$/gm;
+  let match: RegExpExecArray | null;
   while ((match = regex.exec(stderr)) !== null) {
     const [, file, lineStr, colStr, severityRaw, message] = match;
-    const line = parseInt(lineStr, 10);
-    const column = parseInt(colStr, 10);
-    if (file.includes(filename) || file === filename || file.endsWith(".c") || file.endsWith(".cpp")) {
-      problems.push({
-        file: filename,
-        line,
-        column,
-        message: message.trim(),
-        severity: severityRaw === "error" ? "error" : severityRaw === "warning" ? "warning" : "info",
-      });
-    }
+    if (!(file.includes(filename) || file.endsWith(".c") || file.endsWith(".cpp"))) continue;
+    problems.push({
+      file: filename,
+      line: Number(lineStr),
+      column: Number(colStr),
+      message: message.trim(),
+      severity: severityRaw.includes("error") ? "error" : severityRaw === "warning" ? "warning" : "info",
+    });
   }
   return problems;
 }
 
-function parsePythonErrors(stderr: string, filename: string): ExecutionProblem[] {
+export function parsePythonErrors(stderr: string, filename: string): ExecutionProblem[] {
   const problems: ExecutionProblem[] = [];
-  // Example: File "main.py", line 5
-  // SyntaxError: ...
   const lines = stderr.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  let lastLine: number | null = null;
+  for (const line of lines) {
     const fileMatch = line.match(/File "([^"]+)", line (\d+)/);
-    if (fileMatch) {
-      const [, file, lineStr] = fileMatch;
-      const lineNum = parseInt(lineStr, 10);
-      const nextLine = lines[i + 1] || "";
-      if (file.includes(filename) || file === filename || file.endsWith(".py")) {
-        problems.push({
-          file: filename,
-          line: lineNum,
-          message: nextLine.trim() || line.trim(),
-          severity: "error",
-        });
-      }
+    if (fileMatch && (fileMatch[1].includes(filename) || fileMatch[1].endsWith(".py"))) {
+      lastLine = Number(fileMatch[2]);
     }
-    // SyntaxError without File line
-    if (line.includes("SyntaxError") || line.includes("IndentationError") || line.includes("NameError") || line.includes("TypeError")) {
-      // Try to find line number in previous lines
-      const prev = lines.slice(Math.max(0, i - 3), i).join(" ");
-      const lineMatch = prev.match(/line (\d+)/);
-      if (lineMatch) {
-        problems.push({
-          file: filename,
-          line: parseInt(lineMatch[1], 10),
-          message: line.trim(),
-          severity: "error",
-        });
-      }
-    }
+  }
+  const exceptionLine = [...lines].reverse().find((line) => /^[A-Za-z_][\w.]*(Error|Exception|Warning)?\s*:/u.test(line.trim()))?.trim();
+  if (lastLine !== null) {
+    problems.push({
+      file: filename,
+      line: lastLine,
+      message: exceptionLine || "Python error",
+      severity: "error",
+    });
   }
   return problems;
 }
 
-function parseJsErrors(stderr: string, filename: string): ExecutionProblem[] {
+export function parseJsErrors(stderr: string, filename: string): ExecutionProblem[] {
   const problems: ExecutionProblem[] = [];
-  // Example: /tmp/.../main.js:5
-  // ReferenceError: x is not defined
-  const regex = /.*:(\d+)(?::(\d+))?\s*\n.*?(Error|ReferenceError|SyntaxError|TypeError):\s*(.*)/g;
-  let match;
-  // Simpler: look for file:line:column
   const lines = stderr.split("\n");
   for (const line of lines) {
-    const m = line.match(/:(\d+):(\d+)/);
-    if (m && (line.includes(filename) || line.includes(".js") || line.includes(".ts"))) {
+    const m = line.match(/(?:^|[/\\])[^/\\]*\.(?:js|ts):(\d+):(\d+)/);
+    if (m) {
       problems.push({
         file: filename,
-        line: parseInt(m[1], 10),
-        column: parseInt(m[2], 10),
+        line: Number(m[1]),
+        column: Number(m[2]),
         message: line.trim(),
         severity: "error",
       });
-    } else if (line.includes("SyntaxError") || line.includes("ReferenceError")) {
-      const lm = line.match(/:(\d+)/);
-      if (lm) {
-        problems.push({
-          file: filename,
-          line: parseInt(lm[1], 10),
-          message: line.trim(),
-          severity: "error",
-        });
-      }
+      continue;
+    }
+    const syntax = line.match(/^(SyntaxError|ReferenceError|TypeError|RangeError):\s*(.*)$/);
+    if (syntax && problems.length === 0) {
+      problems.push({ file: filename, line: 1, message: line.trim(), severity: "error" });
     }
   }
   return problems;
+}
+
+export function parseBashErrors(stderr: string, filename: string): ExecutionProblem[] {
+  const problems: ExecutionProblem[] = [];
+  const regex = /(?:^|\n)(?:.*?\/)?(?:main\.sh|script\.sh|bash):\s*line\s*(\d+):\s*(.*?)(?=\n|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(stderr)) !== null) {
+    problems.push({
+      file: filename,
+      line: Number(match[1]),
+      message: match[2].trim() || "Shell error",
+      severity: "error",
+    });
+  }
+  return problems;
+}
+
+function isMemoryLimit(result: SpawnResult): boolean {
+  return /out of memory|cannot allocate memory|memory exhausted|memory limit|std::bad_alloc/i.test(result.stderr);
+}
+
+function statusFromRun(result: SpawnResult): ExecutionResult["status"] {
+  if (result.timedOut) return "timeout";
+  if (result.outputTruncated) return "output_limit";
+  if (isMemoryLimit(result)) return "memory_limit";
+  return result.exitCode === 0 ? "success" : "runtime_error";
+}
+
+function cleanSpawnResult(result: SpawnResult, workDir: string): SpawnResult {
+  const cleaned = {
+    ...result,
+    stdout: cleanOutput(result.stdout, workDir),
+    stderr: cleanOutput(result.stderr, workDir),
+    spawnError: result.spawnError ? cleanOutput(result.spawnError, workDir) : undefined,
+  };
+  if (isMemoryLimit(cleaned)) {
+    cleaned.stderr = "Execution exceeded the sandbox memory limit.";
+  }
+  return cleaned;
+}
+
+async function compileTypescript(code: string, workDir: string): Promise<{ ok: true; js: string } | { ok: false; stderr: string; problems: ExecutionProblem[] }> {
+  try {
+    const ts = await import("typescript");
+    const filename = join(workDir, "main.ts");
+    const output = ts.transpileModule(code, {
+      fileName: filename,
+      reportDiagnostics: true,
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2020,
+        strict: false,
+        esModuleInterop: true,
+      },
+    });
+    const errors = (output.diagnostics || []).filter((d) => d.category === ts.DiagnosticCategory.Error);
+    if (errors.length > 0) {
+      const problems = errors.map((diagnostic): ExecutionProblem => {
+        const pos = diagnostic.file && typeof diagnostic.start === "number"
+          ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
+          : null;
+        return {
+          file: "main.ts",
+          line: pos ? pos.line + 1 : 1,
+          column: pos ? pos.character + 1 : 1,
+          message: ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
+          severity: "error",
+        };
+      });
+      return { ok: false, stderr: problems.map((p) => `${p.file}:${p.line}:${p.column}: error: ${p.message}`).join("\n"), problems };
+    }
+    return { ok: true, js: output.outputText };
+  } catch {
+    return {
+      ok: false,
+      stderr: "TypeScript execution is unavailable because the TypeScript compiler package is not installed on the server.",
+      problems: [],
+    };
+  }
 }
 
 export async function executeCode(
   language: ExecutionLanguage,
   code: string,
-  stdin?: string
+  stdin?: string,
 ): Promise<ExecutionResult> {
   const start = Date.now();
 
-  // Validation
   if (code.length > MAX_CODE_SIZE) {
-    return {
-      status: "execution_error",
-      stdout: "",
-      stderr: `Code too large: ${code.length} bytes exceeds ${MAX_CODE_SIZE} limit`,
-      exitCode: null,
-      duration: 0,
-      problems: [],
-    };
+    return baseResult("execution_error", `Code too large: ${code.length} bytes exceeds ${MAX_CODE_SIZE} limit`, 0);
   }
-
   if (stdin && stdin.length > MAX_STDIN_SIZE) {
-    return {
-      status: "execution_error",
-      stdout: "",
-      stderr: `Stdin too large: ${stdin.length} bytes exceeds ${MAX_STDIN_SIZE} limit`,
-      exitCode: null,
-      duration: 0,
-      problems: [],
-    };
+    return baseResult("execution_error", `Stdin too large: ${stdin.length} bytes exceeds ${MAX_STDIN_SIZE} limit`, 0);
   }
 
-  // Create isolated temp dir
+  const backend = await resolveBackend();
+  if (!backend) return unavailable(backendUnavailableMessage(), start);
+
+  const missing = await requireTools(language, backend);
+  if (missing) return unavailable(missing, start);
+
   const execId = randomBytes(8).toString("hex");
   const workDir = join(tmpdir(), `tandem-exec-${execId}`);
-  await fs.mkdir(workDir, { recursive: true });
+  await fs.mkdir(workDir, { recursive: true, mode: 0o700 });
+
+  const run = async (command: string, args: string[], timeoutMs = TIMEOUT_MS) =>
+    cleanSpawnResult(await backend.run(command, args, { cwd: workDir, stdin, timeoutMs }), workDir);
+  const compile = async (command: string, args: string[], timeoutMs = COMPILE_TIMEOUT_MS) =>
+    cleanSpawnResult(await backend.run(command, args, { cwd: workDir, timeoutMs }), workDir);
 
   try {
     switch (language) {
       case "python": {
         const filename = "main.py";
-        const filepath = join(workDir, filename);
-        await fs.writeFile(filepath, code, "utf8");
-
-        const result = await spawnWithLimits("python3", [filename], {
-          cwd: workDir,
-          stdin,
-          timeoutMs: TIMEOUT_MS,
-        });
-
+        await fs.writeFile(join(workDir, filename), code, "utf8");
+        const result = await run("python3", [filename]);
         const problems = parsePythonErrors(result.stderr, filename);
-        const isSuccess = result.exitCode === 0 && !result.timedOut;
-
         return {
-          status: result.timedOut ? "timeout" : result.outputTruncated ? "output_limit" : isSuccess ? "success" : "runtime_error",
+          status: statusFromRun(result),
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode,
@@ -271,193 +492,67 @@ export async function executeCode(
 
       case "javascript": {
         const filename = "main.js";
-        const filepath = join(workDir, filename);
-        await fs.writeFile(filepath, code, "utf8");
-
-        const result = await spawnWithLimits("node", [filename], {
-          cwd: workDir,
-          stdin,
-          timeoutMs: TIMEOUT_MS,
-        });
-
-        const problems = parseJsErrors(result.stderr, filename);
-        const isSuccess = result.exitCode === 0 && !result.timedOut;
-
+        await fs.writeFile(join(workDir, filename), code, "utf8");
+        const result = await run("node", [filename]);
         return {
-          status: result.timedOut ? "timeout" : result.outputTruncated ? "output_limit" : isSuccess ? "success" : "runtime_error",
+          status: statusFromRun(result),
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode,
           duration: Date.now() - start,
-          problems,
+          problems: parseJsErrors(result.stderr, filename),
           timedOut: result.timedOut,
           outputTruncated: result.outputTruncated,
         };
       }
 
       case "typescript": {
-        const filename = "main.ts";
-        const filepath = join(workDir, filename);
-        await fs.writeFile(filepath, code, "utf8");
-
-        // Try to compile with tsc if available, else run with node --loader ts-node/esm or just check syntax
-        // For simplicity, try npx tsc --noEmit to get errors, then run via node with tsx or via tsc compile
-        const compileResult = await spawnWithLimits("npx", ["tsc", "--noEmit", "--skipLibCheck", filename], {
-          cwd: workDir,
-          timeoutMs: 5000,
-        });
-
-        if (compileResult.exitCode !== 0 && compileResult.stderr) {
-          const problems = parseJsErrors(compileResult.stderr + compileResult.stdout, filename);
+        const compiled = await compileTypescript(code, workDir);
+        if (!compiled.ok) {
           return {
             status: "compile_error",
             stdout: "",
-            stderr: compileResult.stderr || compileResult.stdout,
-            exitCode: compileResult.exitCode,
+            stderr: compiled.stderr,
+            exitCode: 1,
             duration: Date.now() - start,
-            compilationOutput: compileResult.stderr,
-            problems,
+            compilationOutput: compiled.stderr,
+            problems: compiled.problems,
           };
         }
-
-        // If tsc not available or no errors, try to run with node (if ts-node available) or transpile via tsc
-        const jsFile = "main.js";
-        const transpileResult = await spawnWithLimits("npx", ["tsc", filename, "--outFile", jsFile, "--module", "commonjs", "--target", "es2020", "--skipLibCheck"], {
-          cwd: workDir,
-          timeoutMs: 5000,
-        });
-
-        if (transpileResult.exitCode === 0) {
-          const runResult = await spawnWithLimits("node", [jsFile], {
-            cwd: workDir,
-            stdin,
-            timeoutMs: TIMEOUT_MS,
-          });
-          const problems = parseJsErrors(runResult.stderr, filename);
-          return {
-            status: runResult.timedOut ? "timeout" : runResult.outputTruncated ? "output_limit" : runResult.exitCode === 0 ? "success" : "runtime_error",
-            stdout: runResult.stdout,
-            stderr: runResult.stderr,
-            exitCode: runResult.exitCode,
-            duration: Date.now() - start,
-            problems,
-            timedOut: runResult.timedOut,
-            outputTruncated: runResult.outputTruncated,
-          };
-        } else {
-          // Fallback: try node with --input-type module if code is JS-compatible
-          const runResult = await spawnWithLimits("node", [filename], {
-            cwd: workDir,
-            stdin,
-            timeoutMs: TIMEOUT_MS,
-          });
-          return {
-            status: runResult.exitCode === 0 ? "success" : "runtime_error",
-            stdout: runResult.stdout,
-            stderr: runResult.stderr + "\n" + transpileResult.stderr,
-            exitCode: runResult.exitCode,
-            duration: Date.now() - start,
-            problems: parseJsErrors(runResult.stderr, filename),
-            timedOut: runResult.timedOut,
-          };
-        }
+        const filename = "main.js";
+        await fs.writeFile(join(workDir, filename), compiled.js, "utf8");
+        const result = await run("node", [filename]);
+        return {
+          status: statusFromRun(result),
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          duration: Date.now() - start,
+          problems: parseJsErrors(result.stderr, "main.ts"),
+          timedOut: result.timedOut,
+          outputTruncated: result.outputTruncated,
+        };
       }
 
       case "c": {
         const filename = "main.c";
-        const filepath = join(workDir, filename);
-        await fs.writeFile(filepath, code, "utf8");
-
-        const compileResult = await spawnWithLimits("gcc", [filename, "-o", "main", "-lm"], {
-          cwd: workDir,
-          timeoutMs: 5000,
-        });
-
-        if (compileResult.exitCode !== 0) {
-          const problems = parseCppErrors(compileResult.stderr, filename);
+        await fs.writeFile(join(workDir, filename), code, "utf8");
+        const compiled = await compile("gcc", [filename, "-o", "main", "-lm"]);
+        if (compiled.exitCode !== 0 || compiled.spawnError) {
+          const stderr = compiled.spawnError ? "C compiler is unavailable in the execution sandbox." : compiled.stderr;
           return {
-            status: "compile_error",
+            status: compiled.spawnError ? "unavailable" : "compile_error",
             stdout: "",
-            stderr: compileResult.stderr,
-            exitCode: compileResult.exitCode,
+            stderr,
+            exitCode: compiled.exitCode,
             duration: Date.now() - start,
-            compilationOutput: compileResult.stderr,
-            problems,
+            compilationOutput: stderr,
+            problems: parseCppErrors(stderr, filename),
           };
         }
-
-        const runResult = await spawnWithLimits("./main", [], {
-          cwd: workDir,
-          stdin,
-          timeoutMs: TIMEOUT_MS,
-        });
-
+        const result = await run("./main", []);
         return {
-          status: runResult.timedOut ? "timeout" : runResult.outputTruncated ? "output_limit" : runResult.exitCode === 0 ? "success" : "runtime_error",
-          stdout: runResult.stdout,
-          stderr: runResult.stderr,
-          exitCode: runResult.exitCode,
-          duration: Date.now() - start,
-          problems: [],
-          timedOut: runResult.timedOut,
-          outputTruncated: runResult.outputTruncated,
-        };
-      }
-
-      case "cpp": {
-        const filename = "main.cpp";
-        const filepath = join(workDir, filename);
-        await fs.writeFile(filepath, code, "utf8");
-
-        const compileResult = await spawnWithLimits("g++", [filename, "-o", "main", "-std=c++17"], {
-          cwd: workDir,
-          timeoutMs: 8000,
-        });
-
-        if (compileResult.exitCode !== 0) {
-          const problems = parseCppErrors(compileResult.stderr, filename);
-          return {
-            status: "compile_error",
-            stdout: "",
-            stderr: compileResult.stderr,
-            exitCode: compileResult.exitCode,
-            duration: Date.now() - start,
-            compilationOutput: compileResult.stderr,
-            problems,
-          };
-        }
-
-        const runResult = await spawnWithLimits("./main", [], {
-          cwd: workDir,
-          stdin,
-          timeoutMs: TIMEOUT_MS,
-        });
-
-        return {
-          status: runResult.timedOut ? "timeout" : runResult.outputTruncated ? "output_limit" : runResult.exitCode === 0 ? "success" : "runtime_error",
-          stdout: runResult.stdout,
-          stderr: runResult.stderr,
-          exitCode: runResult.exitCode,
-          duration: Date.now() - start,
-          problems: [],
-          timedOut: runResult.timedOut,
-          outputTruncated: runResult.outputTruncated,
-        };
-      }
-
-      case "bash": {
-        const filename = "main.sh";
-        const filepath = join(workDir, filename);
-        await fs.writeFile(filepath, code, "utf8");
-
-        const result = await spawnWithLimits("bash", [filename], {
-          cwd: workDir,
-          stdin,
-          timeoutMs: TIMEOUT_MS,
-        });
-
-        return {
-          status: result.timedOut ? "timeout" : result.outputTruncated ? "output_limit" : result.exitCode === 0 ? "success" : "runtime_error",
+          status: statusFromRun(result),
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode,
@@ -468,20 +563,55 @@ export async function executeCode(
         };
       }
 
-      default:
+      case "cpp": {
+        const filename = "main.cpp";
+        await fs.writeFile(join(workDir, filename), code, "utf8");
+        const compiled = await compile("g++", [filename, "-o", "main", "-std=c++17"]);
+        if (compiled.exitCode !== 0 || compiled.spawnError) {
+          const stderr = compiled.spawnError ? "C++ compiler is unavailable in the execution sandbox." : compiled.stderr;
+          return {
+            status: compiled.spawnError ? "unavailable" : "compile_error",
+            stdout: "",
+            stderr,
+            exitCode: compiled.exitCode,
+            duration: Date.now() - start,
+            compilationOutput: stderr,
+            problems: parseCppErrors(stderr, filename),
+          };
+        }
+        const result = await run("./main", []);
         return {
-          status: "unavailable",
-          stdout: "",
-          stderr: `Language ${language} execution is not supported in this environment. Supported: ${["c", "cpp", "python", "javascript", "typescript", "bash"].join(", ")}`,
-          exitCode: null,
+          status: statusFromRun(result),
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
           duration: Date.now() - start,
           problems: [],
+          timedOut: result.timedOut,
+          outputTruncated: result.outputTruncated,
         };
+      }
+
+      case "bash": {
+        const filename = "main.sh";
+        await fs.writeFile(join(workDir, filename), code, "utf8");
+        const result = await run("bash", [filename]);
+        return {
+          status: statusFromRun(result),
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          duration: Date.now() - start,
+          problems: parseBashErrors(result.stderr, filename),
+          timedOut: result.timedOut,
+          outputTruncated: result.outputTruncated,
+        };
+      }
+
+      default:
+        return unavailable(`Language ${language} execution is not supported.`, start);
     }
   } finally {
-    // Cleanup temp dir
-    try {
-      await fs.rm(workDir, { recursive: true, force: true });
-    } catch {}
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }

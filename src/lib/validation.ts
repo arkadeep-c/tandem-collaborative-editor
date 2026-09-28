@@ -3,7 +3,7 @@
  * Pure functions — imported by API routes, the room engine, and unit tests.
  */
 
-import { LANGUAGE_OPTIONS, type TextOp } from "@/lib/types";
+import { isKnownLanguageId, type LanguageId, type TextOp } from "@/lib/types";
 
 /* ------------------------------------------------------------------ */
 /* Limits                                                              */
@@ -50,11 +50,8 @@ export function cleanName(input: unknown): string | null {
   return cleanText(input, MAX_NAME_LENGTH);
 }
 
-export function isLanguageId(input: unknown): input is string {
-  return (
-    typeof input === "string" &&
-    LANGUAGE_OPTIONS.some((option) => option.id === input)
-  );
+export function isLanguageId(input: unknown): input is LanguageId {
+  return isKnownLanguageId(input);
 }
 
 export function isPresenceColor(input: unknown): input is string {

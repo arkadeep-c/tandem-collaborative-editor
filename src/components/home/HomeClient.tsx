@@ -73,6 +73,7 @@ export default function HomeClient() {
 
   const [title, setTitle] = useState("");
   const [language, setLanguage] = useState("typescript");
+  const [starterMode, setStarterMode] = useState<"blank" | "starter">("blank");
   const [codeInput, setCodeInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -167,7 +168,11 @@ export default function HomeClient() {
       const res = await apiFetch("/api/rooms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title.trim() || "Untitled", language }),
+        body: JSON.stringify({
+          title: title.trim() || "Untitled",
+          language,
+          starter: starterMode === "starter",
+        }),
       });
       const data = (await res.json()) as {
         room?: { code: string };
@@ -185,7 +190,7 @@ export default function HomeClient() {
       );
       setBusy(false);
     }
-  }, [language, router, title]);
+  }, [language, router, starterMode, title]);
 
   const joinRoom = useCallback(
     async (rawCode: string) => {
@@ -214,11 +219,29 @@ export default function HomeClient() {
     [router],
   );
 
+  const renameRoom = useCallback(async (room: RoomSummary) => {
+    const next = window.prompt("Rename room", room.title)?.trim();
+    if (!next || next === room.title) return;
+    try {
+      const res = await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: next }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as any).error ?? "Could not rename room.");
+      showToast("Room renamed.", "success");
+      void refresh();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not rename room.", "error");
+    }
+  }, [refresh]);
+
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#07090f]">
       <div className="bg-grid absolute inset-0" aria-hidden />
       <div
-        className="aurora absolute -top-40 left-1/2 h-[480px] w-[720px] -translate-x-1/2 rounded-full bg-violet-600/20"
+        className="aurora absolute -top-40 left-1/2 h-[480px] w-[720px] -translate-x-1/2 rounded-full bg-teal-600/20"
         aria-hidden
       />
       <div
@@ -229,7 +252,7 @@ export default function HomeClient() {
       <div className="relative">
         <nav className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/15 text-violet-300 ring-1 ring-violet-400/30">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500/15 text-teal-300 ring-1 ring-teal-400/30">
               <Braces className="h-4 w-4" />
             </div>
             <span className="text-[15px] font-bold tracking-tight text-slate-100">
@@ -266,7 +289,7 @@ export default function HomeClient() {
                 setFormError(null);
                 setDialog("create");
               }}
-              className="flex items-center gap-2 rounded-lg bg-violet-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-400 active:scale-[0.98]"
+              className="flex items-center gap-2 rounded-lg bg-teal-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-teal-400 active:scale-[0.98]"
             >
               <Plus className="h-4 w-4" />
               Create Room
@@ -296,7 +319,7 @@ export default function HomeClient() {
 
         {bearerFallback && (
           <div className="mx-auto max-w-6xl px-6 pb-6">
-            <div className="rounded-xl border border-violet-400/30 bg-violet-400/10 px-4 py-3 text-sm text-violet-200">
+            <div className="rounded-xl border border-teal-400/30 bg-teal-400/10 px-4 py-3 text-sm text-teal-200">
               <p className="font-medium">
                 Using secure bearer session fallback — your browser is blocking embedded cookies, but collaboration will still work in this preview.
               </p>
@@ -316,7 +339,7 @@ export default function HomeClient() {
             </p>
             <h1 className="max-w-3xl text-5xl font-bold leading-[1.04] tracking-tight text-slate-50 md:text-7xl">
               One room code.{" "}
-              <span className="bg-gradient-to-r from-violet-300 via-fuchsia-300 to-cyan-300 bg-clip-text text-transparent">
+              <span className="bg-gradient-to-r from-teal-300 via-cyan-300 to-cyan-300 bg-clip-text text-transparent">
                 Zero setup.
               </span>
             </h1>
@@ -332,7 +355,7 @@ export default function HomeClient() {
                   setFormError(null);
                   setDialog("create");
                 }}
-                className="flex items-center gap-2 rounded-lg bg-violet-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-400 active:scale-[0.98]"
+                className="flex items-center gap-2 rounded-lg bg-teal-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-400 active:scale-[0.98]"
               >
                 <Plus className="h-4 w-4" />
                 Create Room
@@ -371,7 +394,7 @@ export default function HomeClient() {
               { label: "languages used", value: stats.languages, icon: Cpu },
             ].map(({ label, value, icon: Icon }) => (
               <div key={label} className="flex items-center gap-3">
-                <Icon className="h-4 w-4 text-violet-300/80" />
+                <Icon className="h-4 w-4 text-teal-300/80" />
                 <span className="font-mono text-2xl font-bold text-slate-100">
                   {rooms ? value : "—"}
                 </span>
@@ -403,7 +426,7 @@ export default function HomeClient() {
 
           {!rooms ? (
             <div className="flex items-center gap-3 py-16 text-sm text-slate-500">
-              <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
+              <Loader2 className="h-4 w-4 animate-spin text-teal-400" />
               Loading rooms…
             </div>
           ) : rooms.length === 0 ? (
@@ -427,7 +450,7 @@ export default function HomeClient() {
                     delay: 0.05 * Math.min(index, 8),
                     ease: [0.22, 1, 0.36, 1],
                   }}
-                  className="group relative overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0c101a]/80 p-5 transition duration-300 hover:-translate-y-1 hover:border-violet-400/40 hover:bg-[#0e1320] hover:shadow-2xl hover:shadow-violet-950/40"
+                  className="group relative overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0c101a]/80 p-5 transition duration-300 hover:-translate-y-1 hover:border-teal-400/40 hover:bg-[#0e1320] hover:shadow-2xl hover:shadow-teal-950/40"
                 >
                   <div
                     className="absolute inset-x-0 top-0 h-px opacity-60"
@@ -436,7 +459,7 @@ export default function HomeClient() {
                     }}
                   />
                   <div className="mb-4 flex items-start justify-between">
-                    <Link href={`/room/${room.code}`} className="rounded-md border border-violet-400/30 bg-violet-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-violet-200 hover:bg-violet-400/20">
+                    <Link href={`/room/${room.code}`} className="rounded-md border border-teal-400/30 bg-teal-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-teal-200 hover:bg-teal-400/20">
                       {room.code}
                     </Link>
                     <span className="flex items-center gap-2">
@@ -450,7 +473,7 @@ export default function HomeClient() {
                     </span>
                   </div>
                   <Link href={`/room/${room.code}`} className="block">
-                    <h3 className="truncate text-[15px] font-semibold text-slate-100 group-hover:text-violet-200">
+                    <h3 className="truncate text-[15px] font-semibold text-slate-100 group-hover:text-teal-200">
                       {room.title}
                     </h3>
                     <div className="mt-1 text-xs text-slate-500 font-mono">
@@ -481,9 +504,17 @@ export default function HomeClient() {
                     >
                       Copy Link
                     </button>
-                    <Link href={`/room/${room.code}`} className="rounded-md bg-violet-500 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-violet-400">
+                    <Link href={`/room/${room.code}`} className="rounded-md bg-teal-500 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-teal-400">
                       Open
                     </Link>
+                    {room.role === "owner" && (
+                      <button
+                        onClick={() => void renameRoom(room)}
+                        className="rounded-md border border-white/10 px-2 py-1 text-[10px] font-medium text-slate-400 hover:bg-white/10 hover:text-slate-200"
+                      >
+                        Rename
+                      </button>
+                    )}
                     <button
                       onClick={async () => {
                         if (!confirm(`Leave room ${room.code}?`)) return;
@@ -538,7 +569,7 @@ export default function HomeClient() {
                 transition={{ duration: 0.55, delay: index * 0.08 }}
                 className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6"
               >
-                <div className="mb-4 flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10 text-violet-300 ring-1 ring-violet-400/20">
+                <div className="mb-4 flex h-9 w-9 items-center justify-center rounded-lg bg-teal-500/10 text-teal-300 ring-1 ring-teal-400/20">
                   <Icon className="h-4 w-4" />
                 </div>
                 <h3 className="text-[15px] font-semibold text-slate-100">
@@ -579,10 +610,10 @@ export default function HomeClient() {
               onKeyDown={(event) => event.key === "Enter" && void createRoom()}
               placeholder="api-design.ts"
               maxLength={120}
-              className="mt-5 w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3.5 py-2.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-violet-400/60 focus:ring-2 focus:ring-violet-400/20"
+              className="mt-5 w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3.5 py-2.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/20"
             />
 
-            <div className="mt-4 grid grid-cols-3 gap-2">
+            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
               {LANGUAGE_OPTIONS.map((option) => (
                 <button
                   key={option.id}
@@ -591,14 +622,43 @@ export default function HomeClient() {
                   className={clsx(
                     "rounded-lg border px-2 py-2 font-mono text-[11px] font-semibold transition",
                     language === option.id
-                      ? "border-current"
-                      : "border-white/10 opacity-60 hover:opacity-100",
+                      ? "border-current bg-white/[0.03]"
+                      : "border-white/10 opacity-70 hover:opacity-100",
                   )}
                   style={{ color: option.accent }}
                 >
                   {option.label}
                 </button>
               ))}
+            </div>
+
+            <div className="mt-5 grid grid-cols-2 gap-2" role="group" aria-label="Initial editor content">
+              <button
+                type="button"
+                onClick={() => setStarterMode("blank")}
+                className={clsx(
+                  "rounded-lg border px-3 py-2 text-left text-xs transition",
+                  starterMode === "blank"
+                    ? "border-teal-300/70 bg-teal-400/10 text-teal-100"
+                    : "border-white/10 text-slate-400 hover:bg-white/5 hover:text-slate-200",
+                )}
+              >
+                <span className="block font-semibold">Blank Editor</span>
+                <span className="mt-1 block text-[11px] text-slate-500">Start with an empty document.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStarterMode("starter")}
+                className={clsx(
+                  "rounded-lg border px-3 py-2 text-left text-xs transition",
+                  starterMode === "starter"
+                    ? "border-cyan-300/70 bg-cyan-400/10 text-cyan-100"
+                    : "border-white/10 text-slate-400 hover:bg-white/5 hover:text-slate-200",
+                )}
+              >
+                <span className="block font-semibold">Starter Template</span>
+                <span className="mt-1 block text-[11px] text-slate-500">Insert editable sample code.</span>
+              </button>
             </div>
 
             {formError && (
@@ -620,7 +680,7 @@ export default function HomeClient() {
                 type="button"
                 disabled={busy}
                 onClick={() => void createRoom()}
-                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-violet-500 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-400 active:scale-[0.98] disabled:opacity-60"
+                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-teal-500 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-400 active:scale-[0.98] disabled:opacity-60"
               >
                 {busy && <Loader2 className="h-4 w-4 animate-spin" />}
                 Create room
@@ -654,7 +714,7 @@ export default function HomeClient() {
               placeholder="ABC123"
               maxLength={6}
               spellCheck={false}
-              className="mt-5 w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3.5 py-3 text-center font-mono text-lg font-bold tracking-[0.4em] text-slate-100 outline-none transition placeholder:text-slate-700 focus:border-violet-400/60 focus:ring-2 focus:ring-violet-400/20"
+              className="mt-5 w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3.5 py-3 text-center font-mono text-lg font-bold tracking-[0.4em] text-slate-100 outline-none transition placeholder:text-slate-700 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/20"
             />
 
             {formError && (
@@ -667,7 +727,7 @@ export default function HomeClient() {
               type="button"
               disabled={busy || codeInput.length !== 6}
               onClick={() => void joinRoom(codeInput)}
-              className="mt-6 flex w-full items-center justify-center gap-2 rounded-lg bg-violet-500 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-400 active:scale-[0.98] disabled:opacity-60"
+              className="mt-6 flex w-full items-center justify-center gap-2 rounded-lg bg-teal-500 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-400 active:scale-[0.98] disabled:opacity-60"
             >
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
               Join Room

@@ -54,9 +54,12 @@ export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => null)) as {
     title?: unknown;
     language?: unknown;
+    starter?: unknown;
   } | null;
   const title = cleanTitle(body?.title) ?? "Untitled";
   const language = isLanguageId(body?.language) ? body.language : "markdown";
+  const starterRequested = body?.starter === true;
+  const initialContent = starterRequested ? LANGUAGE_STARTERS[language] ?? "" : "";
 
   let lastError: unknown = null;
   for (let attempt = 0; attempt < CODE_GENERATION_ATTEMPTS; attempt += 1) {
@@ -73,7 +76,7 @@ export async function POST(request: NextRequest) {
               id: newInternalId(),
               title,
               language,
-              content: LANGUAGE_STARTERS[language] ?? "",
+              content: initialContent,
             })
             .returning()
             .get();
@@ -103,7 +106,7 @@ export async function POST(request: NextRequest) {
               id: newInternalId(),
               title,
               language,
-              content: LANGUAGE_STARTERS[language] ?? "",
+              content: initialContent,
             })
             .returning();
           const [roomRow] = await tx

@@ -30,18 +30,22 @@ import CollaborativeMonaco from "@/components/editor/MonacoEditor";
 import PresenceBar from "@/components/editor/PresenceBar";
 import ProfileDialog from "@/components/editor/ProfileDialog";
 import MarkdownPreview from "@/components/editor/MarkdownPreview";
+import SafePreview from "@/components/editor/SafePreview";
 import OutputPanel from "@/components/editor/OutputPanel";
 import ProblemsPanel from "@/components/editor/ProblemsPanel";
+import { showToast } from "@/components/ui/Toast";
 import { useCollaborativeDocument } from "@/lib/useCollaborativeDocument";
 import {
   LANGUAGE_OPTIONS,
+  LANGUAGE_STARTERS,
+  fileExtensionFor,
+  isExecutableLanguage,
   languageAccent,
   type ClientUser,
   type RoomRole,
 } from "@/lib/types";
 import { apiFetch, ensureClientSession } from "@/lib/apiFetch";
 import type { ExecutionResult, ExecutionProblem } from "@/lib/execution/types";
-import { LANGUAGE_CONFIG } from "@/lib/execution/types";
 
 type ViewMode = "edit" | "split" | "preview";
 type BottomTab = "output" | "problems" | "input";
@@ -83,10 +87,13 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const profile = profileOverride ?? state.you ?? you;
   const titleShown = state.title || room.title;
   const isMarkdown = state.language === "markdown";
+  const isHtml = state.language === "html";
+  const isCss = state.language === "css";
+  const hasPreview = isMarkdown || isHtml || isCss;
   const viewMode =
-    (isMarkdown ? manualViewMode : null) ?? (isMarkdown ? "split" : "edit");
+    (hasPreview ? manualViewMode : null) ?? (hasPreview ? "split" : "edit");
 
-  const isExecutable = LANGUAGE_CONFIG[state.language as keyof typeof LANGUAGE_CONFIG]?.executable ?? false;
+  const isExecutable = isExecutableLanguage(state.language);
 
   const latestMirrorRef = useRef("");
   const mirrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -97,6 +104,30 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       mirrorTimerRef.current = null;
       setPreviewContent(latestMirrorRef.current);
     }, 300);
+  }, []);
+
+  const getCurrentContent = useCallback(() => {
+    return editorRef.current?.getModel()?.getValue() ?? latestMirrorRef.current ?? "";
+  }, []);
+
+  const setProblemMarkers = useCallback((problems: ExecutionProblem[]) => {
+    const monaco = monacoRef.current;
+    const model = editorRef.current?.getModel();
+    if (!monaco || !model) return;
+    const markers = problems.map((p) => ({
+      startLineNumber: Math.max(1, p.line),
+      startColumn: Math.max(1, p.column || 1),
+      endLineNumber: Math.max(1, p.line),
+      endColumn: Math.max(2, (p.column || 1) + 10),
+      message: p.message,
+      severity:
+        p.severity === "error"
+          ? monaco.MarkerSeverity.Error
+          : p.severity === "warning"
+            ? monaco.MarkerSeverity.Warning
+            : monaco.MarkerSeverity.Info,
+    }));
+    monaco.editor.setModelMarkers(model, "tandem", markers);
   }, []);
 
   const commitTitle = useCallback(
@@ -123,6 +154,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
   const leaveRoom = useCallback(async () => {
     if (leaving) return;
+    if (!window.confirm(`Leave room ${room.code}?\n\nYou can rejoin later with the invite link or room code.`)) return;
     setLeaving(true);
     try {
       await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, {
@@ -134,7 +166,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
   const runCode = useCallback(async () => {
     if (running) return;
-    const code = latestMirrorRef.current || "";
+    const code = getCurrentContent();
     if (!code.trim()) return;
 
     setRunning(true);
@@ -169,30 +201,9 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         setExecutionResult(result);
         if (result.problems && result.problems.length > 0) {
           setBottomTab("problems");
-          // Set Monaco markers
-          if (monacoRef.current && editorRef.current) {
-            const monaco = monacoRef.current;
-            const model = editorRef.current.getModel();
-            if (model) {
-              const markers = result.problems.map((p: ExecutionProblem) => ({
-                startLineNumber: p.line,
-                startColumn: p.column || 1,
-                endLineNumber: p.line,
-                endColumn: (p.column || 1) + 10,
-                message: p.message,
-                severity: p.severity === "error" ? monaco.MarkerSeverity.Error : p.severity === "warning" ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Info,
-              }));
-              monaco.editor.setModelMarkers(model, "tandem", markers);
-            }
-          }
+          setProblemMarkers(result.problems);
         } else {
-          // Clear markers on success
-          if (monacoRef.current && editorRef.current) {
-            const model = editorRef.current.getModel();
-            if (model) {
-              monacoRef.current.editor.setModelMarkers(model, "tandem", []);
-            }
-          }
+          setProblemMarkers([]);
         }
       }
     } catch (err) {
@@ -207,7 +218,22 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     } finally {
       setRunning(false);
     }
-  }, [running, room.code, state.language, stdin]);
+  }, [getCurrentContent, running, room.code, setProblemMarkers, state.language, stdin]);
+
+  useEffect(() => {
+    const handleRun = () => {
+      if (isExecutable) void runCode();
+    };
+    const handleSave = () => {
+      showToast(state.unsent ? "Saving…" : "Saved", state.unsent ? "info" : "success");
+    };
+    window.addEventListener("tandem-run-code", handleRun);
+    window.addEventListener("tandem-save-request", handleSave);
+    return () => {
+      window.removeEventListener("tandem-run-code", handleRun);
+      window.removeEventListener("tandem-save-request", handleSave);
+    };
+  }, [isExecutable, runCode, state.unsent]);
 
   const jumpToError = useCallback((line: number, column?: number) => {
     if (editorRef.current) {
@@ -218,17 +244,17 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   }, []);
 
   const copyCode = useCallback(async () => {
-    const code = latestMirrorRef.current;
+    const code = getCurrentContent();
     try {
       await navigator.clipboard.writeText(code);
       setCopiedCode(true);
       setTimeout(() => setCopiedCode(false), 1500);
     } catch {}
-  }, []);
+  }, [getCurrentContent]);
 
   const downloadCode = useCallback(() => {
-    const code = latestMirrorRef.current;
-    const ext = LANGUAGE_CONFIG[state.language as keyof typeof LANGUAGE_CONFIG]?.extension || "txt";
+    const code = getCurrentContent();
+    const ext = fileExtensionFor(state.language);
     const filename = `${titleShown.replace(/[^a-z0-9]/gi, "_") || "code"}.${ext}`;
     const blob = new Blob([code], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
@@ -237,38 +263,108 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-  }, [titleShown, state.language]);
+  }, [getCurrentContent, titleShown, state.language]);
 
-  const formatJson = useCallback(() => {
-    if (state.language !== "json") return;
+  const makeJsonProblem = useCallback((code: string, err: unknown): ExecutionProblem => {
+    const message = err instanceof Error ? err.message : "Invalid JSON";
+    const match = message.match(/position (\d+)/i);
+    if (!match) return { file: "data.json", line: 1, column: 1, message, severity: "error" };
+    const position = Number(match[1]);
+    const before = code.slice(0, Math.max(0, position));
+    const lines = before.split("\n");
+    return {
+      file: "data.json",
+      line: lines.length,
+      column: (lines.at(-1)?.length ?? 0) + 1,
+      message,
+      severity: "error",
+    };
+  }, []);
+
+
+  const validateJson = useCallback(() => {
+    if (state.language !== "json") return false;
+    const code = getCurrentContent();
     try {
-      const code = latestMirrorRef.current;
-      const parsed = JSON.parse(code);
-      const formatted = JSON.stringify(parsed, null, 2);
-      if (editorRef.current) {
-        const model = editorRef.current.getModel();
-        if (model) {
-          editorRef.current.executeEdits("format", [
-            {
-              range: model.getFullModelRange(),
-              text: formatted,
-            },
-          ]);
-        }
-      }
-    } catch (e) {
+      JSON.parse(code);
+      setExecutionResult({
+        status: "success",
+        stdout: "JSON is valid.",
+        stderr: "",
+        exitCode: 0,
+        duration: 0,
+        problems: [],
+      });
+      setProblemMarkers([]);
+      setBottomOpen(true);
+      setBottomTab("output");
+      return true;
+    } catch (err) {
+      const problem = makeJsonProblem(code, err);
       setExecutionResult({
         status: "runtime_error",
         stdout: "",
-        stderr: e instanceof Error ? e.message : "Invalid JSON",
+        stderr: problem.message,
         exitCode: 1,
         duration: 0,
-        problems: [{ file: "data.json", line: 1, message: e instanceof Error ? e.message : "Invalid JSON", severity: "error" }],
+        problems: [problem],
       });
+      setProblemMarkers([problem]);
+      setBottomOpen(true);
+      setBottomTab("problems");
+      return false;
+    }
+  }, [getCurrentContent, makeJsonProblem, setProblemMarkers, state.language]);
+
+  const formatJson = useCallback(() => {
+    if (state.language !== "json") return;
+    const code = getCurrentContent();
+    try {
+      const parsed = JSON.parse(code);
+      const formatted = JSON.stringify(parsed, null, 2);
+      const model = editorRef.current?.getModel();
+      if (model) {
+        editorRef.current.executeEdits("format", [
+          {
+            range: model.getFullModelRange(),
+            text: formatted,
+          },
+        ]);
+        setProblemMarkers([]);
+      }
+    } catch (err) {
+      const problem = makeJsonProblem(code, err);
+      setExecutionResult({
+        status: "runtime_error",
+        stdout: "",
+        stderr: problem.message,
+        exitCode: 1,
+        duration: 0,
+        problems: [problem],
+      });
+      setProblemMarkers([problem]);
       setBottomOpen(true);
       setBottomTab("problems");
     }
-  }, [state.language]);
+  }, [getCurrentContent, makeJsonProblem, setProblemMarkers, state.language]);
+
+  const insertStarterTemplate = useCallback(() => {
+    const starter = LANGUAGE_STARTERS[state.language as keyof typeof LANGUAGE_STARTERS];
+    if (!starter) return;
+    const current = getCurrentContent();
+    if (current.trim().length > 0) {
+      const ok = window.confirm(
+        `Replace the current document with the ${LANGUAGE_OPTIONS.find((l) => l.id === state.language)?.label ?? state.language} starter template?\n\nThis is an explicit replace action and cannot be undone after collaborators sync it.`,
+      );
+      if (!ok) return;
+    }
+    const model = editorRef.current?.getModel();
+    if (!model) return;
+    editorRef.current.executeEdits("starter-template", [
+      { range: model.getFullModelRange(), text: starter },
+    ]);
+    editorRef.current.focus();
+  }, [getCurrentContent, state.language]);
 
   const connected = state.connection === "connected";
   const dirty =
@@ -285,7 +381,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-[#07090f] text-slate-200">
       {/* Header */}
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/[0.06] bg-[#0b0e14]/90 px-4 backdrop-blur">
+      <header className="flex h-14 shrink-0 items-center gap-3 overflow-x-auto border-b border-white/[0.06] bg-[#0b0e14]/90 px-4 backdrop-blur">
         <button
           type="button"
           onClick={() => void leaveRoom()}
@@ -295,7 +391,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           {leaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowLeft className="h-4 w-4" />}
         </button>
 
-        <span className="flex items-center gap-1.5 rounded-md border border-violet-400/30 bg-violet-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-violet-200">
+        <span className="flex items-center gap-1.5 rounded-md border border-teal-400/30 bg-teal-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-teal-200">
           {room.code}
         </span>
 
@@ -312,7 +408,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           className={clsx(
             "w-36 truncate rounded-md border bg-transparent px-2 py-1 text-sm font-semibold text-slate-100 outline-none transition sm:w-56 md:w-72",
             isOwner
-              ? "border-transparent hover:border-white/10 focus:border-violet-400/50 focus:bg-[#0b0e14]"
+              ? "border-transparent hover:border-white/10 focus:border-teal-400/50 focus:bg-[#0b0e14]"
               : "cursor-default border-transparent",
           )}
         />
@@ -341,7 +437,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               <select
                 value={state.language}
                 onChange={(event) => void updateMeta({ language: event.target.value })}
-                className="cursor-pointer appearance-none rounded-lg border border-white/10 bg-[#11151f] py-1.5 pl-3 pr-7 text-xs font-medium outline-none transition hover:border-white/20 focus:border-violet-400/50"
+                className="cursor-pointer appearance-none rounded-lg border border-white/10 bg-[#11151f] py-1.5 pl-3 pr-7 text-xs font-medium outline-none transition hover:border-white/20 focus:border-teal-400/50"
                 style={{ color: languageAccent(state.language) }}
               >
                 {LANGUAGE_OPTIONS.map((option) => (
@@ -374,15 +470,32 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               </button>
             )}
             {state.language === "json" && (
-              <button
-                onClick={formatJson}
-                className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10"
-                title="Format JSON"
-              >
-                <FileJson className="h-3.5 w-3.5" />
-                Format
-              </button>
+              <>
+                <button
+                  onClick={validateJson}
+                  className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10"
+                  title="Validate JSON"
+                >
+                  <FileJson className="h-3.5 w-3.5" />
+                  Validate
+                </button>
+                <button
+                  onClick={formatJson}
+                  className="flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10"
+                  title="Format JSON"
+                >
+                  <FileJson className="h-3.5 w-3.5" />
+                  Format
+                </button>
+              </>
             )}
+            <button
+              onClick={insertStarterTemplate}
+              className="hidden rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10 lg:inline-flex"
+              title="Insert or replace with the selected language starter template"
+            >
+              Starter
+            </button>
             <button
               onClick={() => void copyCode()}
               className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200"
@@ -406,7 +519,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             </button>
           </div>
 
-          {isMarkdown && (
+          {hasPreview && (
             <div className="hidden items-center rounded-lg border border-white/10 bg-[#11151f] p-0.5 md:flex">
               {[
                 { id: "edit", icon: Code2, label: "Editor" },
@@ -417,7 +530,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
                   key={id}
                   type="button"
                   onClick={() => setManualViewMode(id as ViewMode)}
-                  className={clsx("flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition", viewMode === id ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200")}
+                  className={clsx("flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition", viewMode === id ? "bg-teal-500/20 text-teal-200" : "text-slate-400 hover:text-slate-200")}
                 >
                   <Icon className="h-3.5 w-3.5" />
                   <span className="hidden lg:inline">{label}</span>
@@ -436,7 +549,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             </button>
             <button
               onClick={() => void copyValue(inviteLink, "link")}
-              className="flex items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-violet-400"
+              className="flex items-center gap-1.5 rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-teal-400"
             >
               {copiedLink ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
               <span className="hidden lg:inline">{copiedLink ? "Copied" : "Share"}</span>
@@ -477,21 +590,14 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       {/* Workspace */}
       <main className="flex min-h-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1">
-          {(viewMode !== "preview" || !isMarkdown) && (
-            <div className={clsx("min-w-0", isMarkdown && viewMode === "split" ? "w-1/2" : "w-full")}>
+          {(viewMode !== "preview" || !hasPreview) && (
+            <div className={clsx("min-w-0", hasPreview && viewMode === "split" ? "w-1/2" : "w-full")}>
               {connected || state.revision > 0 ? (
                 <CollaborativeMonaco
                   language={state.language}
                   users={state.users}
                   selfSessionId={state.selfSessionId}
-                  setBridge={(bridge) => {
-                    setBridge(bridge);
-                    if (bridge) {
-                      // Capture editor instance for settings and jump-to-error
-                      const getEditor = () => (bridge as any).editor || (bridge as any)._editor;
-                      // We'll get editor via ref callback in MonacoEditor
-                    }
-                  }}
+                  setBridge={setBridge}
                   submitLocalOps={submitLocalOps}
                   publishPresence={publishPresence}
                   onMirror={handleMirror}
@@ -506,16 +612,20 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               ) : (
                 <div className="flex h-full items-center justify-center bg-[#0b0e14]">
                   <div className="flex items-center gap-3 text-sm text-slate-500">
-                    <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
+                    <Loader2 className="h-4 w-4 animate-spin text-teal-400" />
                     {state.connection === "error" ? "Could not connect — check membership, then refresh." : "Joining room…"}
                   </div>
                 </div>
               )}
             </div>
           )}
-          {isMarkdown && viewMode !== "edit" && (
+          {hasPreview && viewMode !== "edit" && (
             <div className={clsx("min-w-0 border-l border-white/[0.06] bg-[#0a0d13]", viewMode === "split" ? "w-1/2" : "w-full")}>
-              <MarkdownPreview markdown={previewContent} />
+              {isMarkdown ? (
+                <MarkdownPreview markdown={previewContent} />
+              ) : (
+                <SafePreview language={isHtml ? "html" : "css"} content={previewContent} />
+              )}
             </div>
           )}
         </div>
@@ -526,21 +636,21 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             <div className="flex items-center gap-1 border-b border-white/[0.06] px-2">
               <button
                 onClick={() => setBottomTab("output")}
-                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "output" ? "border-b-2 border-violet-400 text-violet-200" : "text-slate-500 hover:text-slate-300")}
+                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "output" ? "border-b-2 border-teal-400 text-teal-200" : "text-slate-500 hover:text-slate-300")}
               >
                 <TerminalIcon className="h-3.5 w-3.5" />
                 Output
               </button>
               <button
                 onClick={() => setBottomTab("problems")}
-                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "problems" ? "border-b-2 border-violet-400 text-violet-200" : "text-slate-500 hover:text-slate-300")}
+                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "problems" ? "border-b-2 border-teal-400 text-teal-200" : "text-slate-500 hover:text-slate-300")}
               >
                 <Bug className="h-3.5 w-3.5" />
                 Problems {problemsCount > 0 && <span className={clsx("rounded px-1.5 text-[10px]", errorsCount > 0 ? "bg-rose-400/20 text-rose-300" : "bg-white/10 text-slate-400")}>{problemsCount}</span>}
               </button>
               <button
                 onClick={() => setBottomTab("input")}
-                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "input" ? "border-b-2 border-violet-400 text-violet-200" : "text-slate-500 hover:text-slate-300")}
+                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "input" ? "border-b-2 border-teal-400 text-teal-200" : "text-slate-500 hover:text-slate-300")}
               >
                 <TerminalIcon className="h-3.5 w-3.5" />
                 Input
@@ -561,9 +671,9 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
                     value={stdin}
                     onChange={(e) => setStdin(e.target.value)}
                     placeholder="Enter input for your program, e.g.&#10;5&#10;10&#10;20"
-                    className="flex-1 resize-none rounded border border-white/10 bg-[#0b0e14] p-3 font-mono text-xs text-slate-200 outline-none focus:border-violet-400/50"
+                    className="flex-1 resize-none rounded border border-white/10 bg-[#0b0e14] p-3 font-mono text-xs text-slate-200 outline-none focus:border-teal-400/50"
                   />
-                  <div className="mt-2 text-[10px] text-slate-600">Max 10KB, will be fed to program's stdin</div>
+                  <div className="mt-2 text-[10px] text-slate-600">Max 10KB, will be fed to program&apos;s stdin</div>
                 </div>
               )}
             </div>

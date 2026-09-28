@@ -35,7 +35,7 @@ export default function OutputPanel({ result, running, onClear }: OutputPanelPro
         </div>
         <div className="flex flex-1 items-center justify-center">
           <div className="flex items-center gap-3 text-sm text-slate-500">
-            <span className="h-4 w-4 animate-spin rounded-full border-2 border-violet-400 border-t-transparent" />
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-teal-400 border-t-transparent" />
             Executing code...
           </div>
         </div>
@@ -62,7 +62,7 @@ export default function OutputPanel({ result, running, onClear }: OutputPanelPro
     );
   }
 
-  const isError = result.status === "compile_error" || result.status === "runtime_error" || result.status === "timeout" || result.status === "execution_error";
+  const isError = ["compile_error", "runtime_error", "timeout", "execution_error", "memory_limit", "unavailable"].includes(result.status);
   const isSuccess = result.status === "success";
 
   return (
@@ -78,6 +78,7 @@ export default function OutputPanel({ result, running, onClear }: OutputPanelPro
             {result.status === "runtime_error" && "❌ Runtime Error"}
             {result.status === "timeout" && "⏱ Timeout"}
             {result.status === "output_limit" && "⚠ Output Limit"}
+            {result.status === "memory_limit" && "⚠ Memory Limit"}
             {result.status === "execution_error" && "❌ Execution Error"}
             {result.status === "unavailable" && "⚠ Unavailable"}
           </span>

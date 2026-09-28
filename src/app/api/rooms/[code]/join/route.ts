@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
 import { db, isUsingLocalDb } from "@/db";
-import { roomMembers } from "@/db/schema";
+import { roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
 import { roomJoinLimiter } from "@/lib/rateLimit";
 import { isValidRoomCode, normalizeRoomCode } from "@/lib/roomCode";
@@ -57,18 +58,31 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   }
 
   const existing = await getMembership(found.room.id, session.user.id);
+  let grantedRole = existing?.role ?? "editor";
   if (!existing) {
+    const [anyMember] = await (db as any)
+      .select({ userId: roomMembers.userId })
+      .from(roomMembers)
+      .where(eq(roomMembers.roomId, found.room.id))
+      .limit(1);
+    grantedRole = anyMember ? "editor" : "owner";
     if (isUsingLocalDb()) {
       (db as any)
         .insert(roomMembers)
-        .values({ roomId: found.room.id, userId: session.user.id, role: "editor" })
+        .values({ roomId: found.room.id, userId: session.user.id, role: grantedRole })
         .onConflictDoNothing()
         .run();
+      if (grantedRole === "owner") {
+        (db as any).update(rooms).set({ ownerId: session.user.id, updatedAt: new Date() }).where(eq(rooms.id, found.room.id)).run();
+      }
     } else {
       await (db as any)
         .insert(roomMembers)
-        .values({ roomId: found.room.id, userId: session.user.id, role: "editor" })
+        .values({ roomId: found.room.id, userId: session.user.id, role: grantedRole })
         .onConflictDoNothing();
+      if (grantedRole === "owner") {
+        await (db as any).update(rooms).set({ ownerId: session.user.id, updatedAt: new Date() }).where(eq(rooms.id, found.room.id));
+      }
     }
   }
 
@@ -79,7 +93,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
       language: found.document.language,
       activeUsers: roomEngine.getActiveCount(code),
     },
-    role: existing?.role ?? "editor",
+    role: grantedRole,
     alreadyMember: Boolean(existing),
   };
   if (issueBearer && !auth.cookieValid) {

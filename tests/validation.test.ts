@@ -38,8 +38,10 @@ describe("language registry", () => {
       "python",
       "c",
       "cpp",
-      "java",
+      "bash",
       "markdown",
+      "html",
+      "css",
       "json",
     ]) {
       expect(isLanguageId(id)).toBe(true);
