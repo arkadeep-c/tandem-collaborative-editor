@@ -5,7 +5,7 @@ import { roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
 import { roomJoinLimiter } from "@/lib/rateLimit";
 import { isValidRoomCode, normalizeRoomCode } from "@/lib/roomCode";
-import { findRoomByCode, getMembership } from "@/lib/roomAccess";
+import { findRoomByCode, getMembership, listRoomMembers } from "@/lib/roomAccess";
 import {
   createSession,
   createBearerToken,
@@ -58,6 +58,13 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   }
 
   const existing = await getMembership(found.room.id, session.user.id);
+  if (!existing && found.room.locked) {
+    return NextResponse.json(
+      { error: "This room is locked by the room owner." },
+      { status: 403 },
+    );
+  }
+
   let grantedRole = existing?.role ?? "editor";
   let insertedMembership = false;
   if (!existing) {
@@ -88,11 +95,13 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     insertedMembership = true;
   }
 
-  if (insertedMembership) {
-    const activeRoom = await roomEngine.getRoom(code);
-    if (typeof activeRoom?.notifyMemberJoined === "function") {
-      activeRoom.notifyMemberJoined(session.user);
-    }
+  const activeRoom = await roomEngine.getRoom(code);
+  const members = await listRoomMembers(
+    found.room.id,
+    activeRoom ? [...activeRoom.users.values()] : [],
+  );
+  if (insertedMembership && typeof activeRoom?.notifyMemberJoined === "function") {
+    activeRoom.notifyMemberJoined(session.user, members);
   }
 
   const responseBody: any = {
@@ -100,8 +109,10 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
       code,
       title: found.document.title,
       language: found.document.language,
+      locked: Boolean(found.room.locked),
       activeUsers: roomEngine.getActiveCount(code),
     },
+    members,
     role: grantedRole,
     alreadyMember: Boolean(existing),
   };

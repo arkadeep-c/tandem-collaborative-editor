@@ -36,6 +36,13 @@ export interface ClientUser {
   color: string;
 }
 
+export interface RoomMemberInfo {
+  user: ClientUser;
+  role: RoomRole;
+  joinedAt: string;
+  online: boolean;
+}
+
 export interface CursorPosition {
   line: number;
   column: number;
@@ -68,6 +75,7 @@ export interface RoomInfo {
   code: string;
   title: string;
   language: string;
+  locked: boolean;
   memberCount: number;
   activeUsers: number;
   createdAt: string;
@@ -85,12 +93,13 @@ export interface RoomSummary extends RoomInfo {
 export type ServerEvent =
   | {
       type: "init";
-      room: { code: string; title: string; language: string };
+      room: { code: string; title: string; language: string; locked: boolean };
       you: { user: ClientUser; role: RoomRole };
       content: string;
       revision: number;
       sessionId: string;
       users: PresenceState[];
+      members: RoomMemberInfo[];
       cacheMode: "redis" | "memory";
     }
   | {
@@ -101,8 +110,12 @@ export type ServerEvent =
     }
   | { type: "presence"; user: PresenceState }
   | { type: "leave"; sessionId: string; userId: string }
-  | { type: "member_join"; user: ClientUser }
-  | { type: "member_leave"; user: ClientUser }
+  | { type: "member_join"; user: ClientUser; members: RoomMemberInfo[] }
+  | { type: "member_leave"; user: ClientUser; members: RoomMemberInfo[] }
+  | { type: "member_kick"; user: ClientUser; members: RoomMemberInfo[] }
+  | { type: "members"; members: RoomMemberInfo[] }
+  | { type: "room_lock"; locked: boolean }
+  | { type: "access_revoked"; reason: "kicked"; message: string }
   | { type: "meta"; title?: string; language?: string }
   | { type: "saved"; revision: number; savedAt: string; mode: "redis" | "memory" }
   | { type: "error"; message: string };

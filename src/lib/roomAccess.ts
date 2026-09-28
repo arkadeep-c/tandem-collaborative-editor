@@ -1,10 +1,11 @@
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { db } from "@/db";
 import {
   documents,
   roomMembers,
   rooms,
+  users,
   type DocumentRow,
   type RoomMemberRow,
   type RoomRow,
@@ -15,6 +16,7 @@ import {
   type SessionUser,
 } from "@/lib/session";
 import { isValidRoomCode, normalizeRoomCode } from "@/lib/roomCode";
+import type { PresenceState, RoomMemberInfo, RoomRole } from "@/lib/types";
 
 /**
  * Central authorization gate for every room-scoped route.
@@ -50,6 +52,45 @@ export async function getMembership(
     .where(and(eq(roomMembers.roomId, roomId), eq(roomMembers.userId, userId)))
     .limit(1);
   return rows[0] ?? null;
+}
+
+function toIso(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number" || typeof value === "string") {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return new Date().toISOString();
+}
+
+export async function listRoomMembers(
+  roomId: string,
+  activePresence: PresenceState[] = [],
+): Promise<RoomMemberInfo[]> {
+  const onlineIds = new Set(activePresence.map((presence) => presence.user.id));
+  const rows = await db
+    .select({
+      role: roomMembers.role,
+      joinedAt: roomMembers.joinedAt,
+      userId: users.id,
+      name: users.name,
+      color: users.color,
+    })
+    .from(roomMembers)
+    .innerJoin(users, eq(roomMembers.userId, users.id))
+    .where(eq(roomMembers.roomId, roomId))
+    .orderBy(asc(roomMembers.joinedAt));
+
+  return rows.map((row: any) => ({
+    user: {
+      id: row.userId,
+      name: row.name,
+      color: row.color,
+    },
+    role: row.role === "owner" ? "owner" : ("editor" as RoomRole),
+    joinedAt: toIso(row.joinedAt),
+    online: onlineIds.has(row.userId),
+  }));
 }
 
 export type RoomAccess =

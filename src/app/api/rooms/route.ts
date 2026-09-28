@@ -132,6 +132,7 @@ export async function POST(request: NextRequest) {
           code: room!.code,
           title: doc!.title,
           language: doc!.language,
+          locked: false,
         },
       };
       if (issueBearer && !auth.cookieValid) {

@@ -7,13 +7,14 @@ import type {
   CursorPosition,
   OperationBatch,
   PresenceState,
+  RoomMemberInfo,
   RoomRole,
   SelectionRange,
   ServerEvent,
   TextOp,
 } from "@/lib/types";
 import { showToast } from "@/components/ui/Toast";
-import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
+import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken } from "@/lib/apiFetch";
 
 export type ConnectionStatus =
   | "connecting"
@@ -32,6 +33,9 @@ export interface CollabState {
   you: ClientUser | null;
   role: RoomRole;
   users: PresenceState[];
+  members: RoomMemberInfo[];
+  locked: boolean;
+  accessRevokedMessage: string | null;
   title: string;
   language: string;
   revision: number;
@@ -57,6 +61,11 @@ type SessionResponse = {
   sessionToken?: string;
 };
 
+function roleForSelf(members: RoomMemberInfo[], userId?: string): RoomRole | null {
+  if (!userId) return null;
+  return members.find((member) => member.user.id === userId)?.role ?? null;
+}
+
 export function useCollaborativeDocument(roomCode: string) {
   const [state, setState] = useState<CollabState>({
     connection: "connecting",
@@ -64,6 +73,9 @@ export function useCollaborativeDocument(roomCode: string) {
     you: null,
     role: "editor",
     users: [],
+    members: [],
+    locked: false,
+    accessRevokedMessage: null,
     title: "",
     language: "markdown",
     revision: 0,
@@ -176,6 +188,9 @@ export function useCollaborativeDocument(roomCode: string) {
             you: event.you.user,
             role: event.you.role,
             users: event.users,
+            members: event.members ?? [],
+            locked: event.room.locked ?? false,
+            accessRevokedMessage: null,
             title: event.room.title,
             language: event.room.language,
             revision: event.revision,
@@ -231,23 +246,100 @@ export function useCollaborativeDocument(roomCode: string) {
                     u.sessionId === event.user.sessionId ? event.user : u,
                   );
             const you = prev.you?.id === event.user.user.id ? event.user.user : prev.you;
-            return { ...prev, users, you };
+            const onlineIds = new Set(users.map((presence) => presence.user.id));
+            const members = prev.members.map((member) =>
+              member.user.id === event.user.user.id
+                ? {
+                    ...member,
+                    user: event.user.user,
+                    online: onlineIds.has(member.user.id),
+                  }
+                : { ...member, online: onlineIds.has(member.user.id) },
+            );
+            return { ...prev, users, members, you };
           });
           break;
         }
         case "leave": {
-          setState((prev) => ({
-            ...prev,
-            users: prev.users.filter((u) => u.sessionId !== event.sessionId),
-          }));
+          setState((prev) => {
+            const users = prev.users.filter((u) => u.sessionId !== event.sessionId);
+            const onlineIds = new Set(users.map((presence) => presence.user.id));
+            return {
+              ...prev,
+              users,
+              members: prev.members.map((member) => ({
+                ...member,
+                online: onlineIds.has(member.user.id),
+              })),
+            };
+          });
           break;
         }
         case "member_join": {
           showToast(`${event.user.name} joined your coding room`, "info");
+          setState((prev) => {
+            const members = event.members ?? prev.members;
+            return {
+              ...prev,
+              members,
+              role: roleForSelf(members, prev.you?.id) ?? prev.role,
+            };
+          });
           break;
         }
         case "member_leave": {
           showToast(`${event.user.name} left the room`, "info");
+          setState((prev) => {
+            const members = event.members ?? prev.members;
+            return {
+              ...prev,
+              members,
+              role: roleForSelf(members, prev.you?.id) ?? prev.role,
+            };
+          });
+          break;
+        }
+        case "member_kick": {
+          showToast(`${event.user.name} was removed from the room`, "info");
+          setState((prev) => {
+            const members = event.members ?? prev.members;
+            return {
+              ...prev,
+              members,
+              role: roleForSelf(members, prev.you?.id) ?? prev.role,
+            };
+          });
+          break;
+        }
+        case "members": {
+          setState((prev) => {
+            const members = event.members ?? prev.members;
+            return {
+              ...prev,
+              members,
+              role: roleForSelf(members, prev.you?.id) ?? prev.role,
+            };
+          });
+          break;
+        }
+        case "room_lock": {
+          showToast(event.locked ? "Room locked" : "Room unlocked", "info");
+          setState((prev) => ({ ...prev, locked: event.locked }));
+          break;
+        }
+        case "access_revoked": {
+          showToast(event.message, "error");
+          sourceRef.current?.close();
+          sourceRef.current = null;
+          fetchControllerRef.current?.abort();
+          fetchControllerRef.current = null;
+          setState((prev) => ({
+            ...prev,
+            connection: "error",
+            accessRevokedMessage: event.message,
+            users: [],
+            members: [],
+          }));
           break;
         }
         case "meta": {
@@ -359,6 +451,10 @@ export function useCollaborativeDocument(roomCode: string) {
         "leave",
         "member_join",
         "member_leave",
+        "member_kick",
+        "members",
+        "room_lock",
+        "access_revoked",
         "meta",
         "saved",
       ] as const) {
@@ -435,9 +531,16 @@ export function useCollaborativeDocument(roomCode: string) {
             u.sessionId === prev.selfSessionId ||
             now - u.lastActiveAt < GONE_AFTER_MS,
         );
-        return alive.length === prev.users.length
-          ? prev
-          : { ...prev, users: alive };
+        if (alive.length === prev.users.length) return prev;
+        const onlineIds = new Set(alive.map((presence) => presence.user.id));
+        return {
+          ...prev,
+          users: alive,
+          members: prev.members.map((member) => ({
+            ...member,
+            online: onlineIds.has(member.user.id),
+          })),
+        };
       });
     }, 5_000);
 

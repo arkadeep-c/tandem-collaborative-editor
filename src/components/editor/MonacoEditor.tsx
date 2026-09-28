@@ -26,6 +26,7 @@ interface MonacoEditorProps {
   language: string;
   users: PresenceState[];
   selfSessionId: string;
+  selfUserId?: string;
   setBridge: (bridge: EditorBridge | null) => void;
   submitLocalOps: (ops: TextOp[]) => void;
   publishPresence: (patch: PresencePatch) => void;
@@ -48,6 +49,7 @@ export default function MonacoEditor({
   language,
   users,
   selfSessionId,
+  selfUserId,
   setBridge,
   submitLocalOps,
   publishPresence,
@@ -310,8 +312,15 @@ export default function MonacoEditor({
     const tag = styleTagRef.current;
     if (!ed || !model || !tag || !decorationsRef.current) return;
 
-    const peers = users.filter(
-      (u) => u.sessionId !== selfSessionId && u.cursor !== null,
+    const peersBySession = new Map<string, PresenceState>();
+    for (const presence of users) {
+      if (!presence.sessionId || presence.sessionId === selfSessionId) continue;
+      if (selfUserId && presence.user.id === selfUserId) continue;
+      if (!presence.cursor) continue;
+      peersBySession.set(presence.sessionId, presence);
+    }
+    const peers = [...peersBySession.values()].sort((a, b) =>
+      a.sessionId.localeCompare(b.sessionId),
     );
 
     const decorations: monacoEditor.IModelDeltaDecoration[] = [];
@@ -370,7 +379,7 @@ export default function MonacoEditor({
 
     decorationsRef.current.set(decorations);
     tag.textContent = css.join("\n");
-  }, [users, selfSessionId]);
+  }, [users, selfSessionId, selfUserId]);
 
   /* ---------------------------------------------------------------- */
   /* Language switching (room-wide meta event)                        */

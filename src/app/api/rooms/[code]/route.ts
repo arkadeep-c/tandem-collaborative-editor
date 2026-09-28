@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { roomEngine } from "@/lib/collab/rooms";
 import { metaUpdateLimiter } from "@/lib/rateLimit";
-import { requireRoomAccess } from "@/lib/roomAccess";
+import { listRoomMembers, requireRoomAccess } from "@/lib/roomAccess";
 import { getAuthenticatedSessionFromRequest, type SessionUser } from "@/lib/session";
 import { cleanTitle, isLanguageId } from "@/lib/validation";
 
@@ -20,15 +20,22 @@ export async function GET(request: NextRequest, ctx: RouteContext) {
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
+  const activeRoom = await roomEngine.getRoom(access.code);
+  const members = await listRoomMembers(
+    access.room.id,
+    activeRoom ? [...activeRoom.users.values()] : [],
+  );
   return NextResponse.json({
     room: {
       code: access.code,
       title: access.document.title,
       language: access.document.language,
+      locked: Boolean(access.room.locked),
       role: access.member.role === "owner" ? "owner" : "editor",
       activeUsers: roomEngine.getActiveCount(access.code),
       updatedAt: access.room.updatedAt.toISOString(),
     },
+    members,
     you: {
       id: access.session.user.id,
       name: access.session.user.name,

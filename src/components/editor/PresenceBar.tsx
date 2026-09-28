@@ -20,6 +20,7 @@ function initialsOf(name: string): string {
 interface PresenceBarProps {
   users: PresenceState[];
   selfSessionId: string;
+  selfUserId?: string;
   onEditProfile: () => void;
 }
 
@@ -28,6 +29,7 @@ const MAX_VISIBLE = 6;
 export default function PresenceBar({
   users,
   selfSessionId,
+  selfUserId,
   onEditProfile,
 }: PresenceBarProps) {
   const [hovered, setHovered] = useState<string | null>(null);
@@ -47,7 +49,10 @@ export default function PresenceBar({
   const visible = deduped.slice(0, MAX_VISIBLE);
   const overflow = deduped.length - visible.length;
   const remoteTyping = deduped.filter(
-    (presence) => presence.sessionId !== selfSessionId && presence.typing,
+    (presence) =>
+      presence.sessionId !== selfSessionId &&
+      (!selfUserId || presence.user.id !== selfUserId) &&
+      presence.typing,
   );
   const typingLabel = remoteTyping.length === 0
     ? null
@@ -59,7 +64,9 @@ export default function PresenceBar({
     <div className="flex items-center">
       <div className="flex -space-x-2">
         {visible.map((presence) => {
-          const isSelf = presence.sessionId === selfSessionId;
+          const isSelf =
+            presence.sessionId === selfSessionId ||
+            Boolean(selfUserId && presence.user.id === selfUserId);
           return (
             <div
               key={presence.sessionId}

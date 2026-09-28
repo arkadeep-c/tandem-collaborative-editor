@@ -8,6 +8,7 @@ import { opWithinBounds } from "@/lib/validation";
 import type {
   ClientUser,
   PresenceState,
+  RoomMemberInfo,
   ServerEvent,
   TextOp,
 } from "@/lib/types";
@@ -48,6 +49,7 @@ export interface RoomRecord {
   documentId: string;
   title: string;
   language: string;
+  locked: boolean;
 }
 
 class Room {
@@ -62,10 +64,14 @@ class Room {
   private dirty = false;
   private loaded = false;
 
-  meta: { title: string; language: string };
+  meta: { title: string; language: string; locked: boolean };
 
   constructor(readonly record: RoomRecord) {
-    this.meta = { title: record.title, language: record.language };
+    this.meta = {
+      title: record.title,
+      language: record.language,
+      locked: record.locked,
+    };
   }
 
   get documentId(): string {
@@ -167,12 +173,31 @@ class Room {
     return true;
   }
 
-  notifyMemberJoined(user: ClientUser): void {
-    this.dispatchExceptUser({ type: "member_join", user }, user.id);
+  notifyMemberJoined(user: ClientUser, members: RoomMemberInfo[]): void {
+    this.dispatchExceptUser({ type: "member_join", user, members }, user.id);
   }
 
-  notifyMemberLeft(user: ClientUser): void {
-    this.dispatchExceptUser({ type: "member_leave", user }, user.id);
+  notifyMemberLeft(user: ClientUser, members: RoomMemberInfo[]): void {
+    this.dispatchExceptUser({ type: "member_leave", user, members }, user.id);
+  }
+
+  notifyMemberKicked(user: ClientUser, members: RoomMemberInfo[]): void {
+    this.sendToUser(user.id, {
+      type: "access_revoked",
+      reason: "kicked",
+      message: "You were removed from this coding room by the room owner.",
+    });
+    this.dispatchExceptUser({ type: "member_kick", user, members }, user.id);
+    this.leaveUser(user.id, false);
+  }
+
+  notifyMembersChanged(members: RoomMemberInfo[]): void {
+    this.broadcast({ type: "members", members });
+  }
+
+  setLocked(locked: boolean): void {
+    this.meta.locked = locked;
+    this.broadcast({ type: "room_lock", locked });
   }
 
   /* ---------------- operations ---------------- */
@@ -386,6 +411,19 @@ class Room {
     }
   }
 
+  private sendToUser(userId: string, event: ServerEvent): void {
+    for (const [connectionId, bucket] of this.subscribers) {
+      if (this.users.get(connectionId)?.user.id !== userId) continue;
+      for (const fn of bucket) {
+        try {
+          fn(event);
+        } catch {
+          /* reaped by its own disconnect handler */
+        }
+      }
+    }
+  }
+
   private dispatch(event: ServerEvent, exceptConnectionId: string | null): void {
     for (const [connectionId, bucket] of this.subscribers) {
       if (connectionId === exceptConnectionId) continue;
@@ -436,6 +474,7 @@ class RoomEngine {
         documentId: rooms.documentId,
         title: documents.title,
         language: documents.language,
+        locked: rooms.locked,
       })
       .from(rooms)
       .innerJoin(documents, eq(rooms.documentId, documents.id))

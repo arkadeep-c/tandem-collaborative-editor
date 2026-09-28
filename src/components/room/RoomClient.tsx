@@ -14,7 +14,7 @@ interface RoomClientProps {
 
 export default function RoomClient({ code }: RoomClientProps) {
   const [status, setStatus] = useState<"loading" | "not-found" | "join" | "editor">("loading");
-  const [room, setRoom] = useState<{ code: string; title: string; language: string } | null>(null);
+  const [room, setRoom] = useState<{ code: string; title: string; language: string; locked?: boolean } | null>(null);
   const [you, setYou] = useState<ClientUser | null>(null);
   const [role, setRole] = useState<RoomRole>("editor");
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +62,7 @@ export default function RoomClient({ code }: RoomClientProps) {
         // To avoid auto-join, we will show placeholder and let JoinGate handle real title after join.
         // But we can try to fetch room metadata via a public endpoint: we don't have one, so we will attempt to get it via a direct call to /api/rooms/[code]/join which is idempotent and returns title — this will actually join the user, which is okay for bearer flow? The spec says join gate is confirmation step, so we should NOT auto-join.
         // So we keep placeholder.
-        setRoom({ code, title: code, language: "markdown" });
+        setRoom({ code, title: code, language: "markdown", locked: false });
         setStatus("join");
         console.log("[ROOM_CLIENT] ROOM_CLIENT_FETCH → join gate");
         return;
@@ -75,7 +75,7 @@ export default function RoomClient({ code }: RoomClientProps) {
       }
 
       const data = (await roomRes.json()) as {
-        room: { code: string; title: string; language: string; role: RoomRole };
+        room: { code: string; title: string; language: string; locked?: boolean; role: RoomRole };
         you: ClientUser;
         sessionToken?: string;
       };

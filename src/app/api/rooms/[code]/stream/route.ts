@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { newConnectionId, roomEngine } from "@/lib/collab/rooms";
 import { resolveDocStore } from "@/lib/collab/store";
-import { requireRoomAccess } from "@/lib/roomAccess";
+import { listRoomMembers, requireRoomAccess } from "@/lib/roomAccess";
 import type { ServerEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -42,6 +42,7 @@ export async function GET(request: NextRequest, ctx: RouteContext) {
   };
   const connectionId = newConnectionId();
   const role = access.member.role === "owner" ? "owner" : "editor";
+  const members = await listRoomMembers(access.room.id);
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({
@@ -63,6 +64,9 @@ export async function GET(request: NextRequest, ctx: RouteContext) {
 
       room.join(connectionId, user);
       const unsubscribe = room.subscribe(connectionId, send);
+      const activeUserIds = new Set(
+        [...room.users.values()].map((presence) => presence.user.id),
+      );
 
       send({
         type: "init",
@@ -70,12 +74,17 @@ export async function GET(request: NextRequest, ctx: RouteContext) {
           code: access.code,
           title: room.meta.title,
           language: room.meta.language,
+          locked: room.meta.locked,
         },
         you: { user, role },
         content: room.content,
         revision: room.revision,
         sessionId: connectionId,
         users: [...room.users.values()],
+        members: members.map((member) => ({
+          ...member,
+          online: activeUserIds.has(member.user.id),
+        })),
         cacheMode: store.mode,
       });
 

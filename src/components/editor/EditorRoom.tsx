@@ -15,12 +15,16 @@ import {
   HardDrive,
   Link2,
   Loader2,
+  Lock,
   LogOut,
+  MoreVertical,
   Play,
-  Square,
   Download,
   Settings,
-  Trash2,
+  Unlock,
+  UserMinus,
+  Users,
+  ShieldAlert,
   FileJson,
   Bug,
   Terminal as TerminalIcon,
@@ -41,6 +45,7 @@ import {
   fileExtensionFor,
   languageAccent,
   type ClientUser,
+  type RoomMemberInfo,
   type RoomRole,
 } from "@/lib/types";
 import { apiFetch, ensureClientSession } from "@/lib/apiFetch";
@@ -50,7 +55,7 @@ type ViewMode = "edit" | "split" | "preview";
 type BottomTab = "output" | "problems" | "input";
 
 interface EditorRoomProps {
-  room: { code: string; title: string; language: string };
+  room: { code: string; title: string; language: string; locked?: boolean };
   you: ClientUser;
   role: RoomRole;
 }
@@ -65,6 +70,10 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const [manualViewMode, setManualViewMode] = useState<ViewMode | null>(null);
   const [previewContent, setPreviewContent] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [memberMenuUserId, setMemberMenuUserId] = useState<string | null>(null);
+  const [lockUpdating, setLockUpdating] = useState(false);
+  const [kickingUserId, setKickingUserId] = useState<string | null>(null);
 
   // Execution state
   const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
@@ -83,17 +92,26 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const { state, setBridge, submitLocalOps, publishPresence, updateMeta } =
     useCollaborativeDocument(room.code);
 
-  const isOwner = role === "owner";
   const profile = profileOverride ?? state.you ?? you;
+  const selfUserId = profile.id;
+  const currentMembers = state.members;
+  const selfMember = currentMembers.find((member) => member.user.id === selfUserId);
+  const currentRole = selfMember?.role ?? state.role ?? role;
+  const isOwner = currentRole === "owner";
+  const roomLocked =
+    state.connection === "connected" || currentMembers.length > 0
+      ? state.locked
+      : Boolean(room.locked);
   const titleShown = state.title || room.title;
   const isMarkdown = state.language === "markdown";
   const isHtml = state.language === "html";
   const isCss = state.language === "css";
-  const hasPreview = isMarkdown || isHtml || isCss;
-  const viewMode =
-    (hasPreview ? manualViewMode : null) ?? (hasPreview ? "split" : "edit");
-
   const isExecutable = isExecutionLanguage(state.language);
+  const hasPreview = isMarkdown || isHtml || isCss;
+  const hasResultPane = isExecutable || state.language === "json";
+  const hasCompanionPane = hasPreview || hasResultPane;
+  const viewMode = manualViewMode ?? (hasPreview ? "split" : "edit");
+
   const currentExecutionAvailability = isExecutable
     ? executionAvailability?.languages[state.language as keyof ExecutionAvailability["languages"]]
     : null;
@@ -187,11 +205,53 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     router.push("/");
   }, [leaving, room.code, router]);
 
+  const toggleRoomLock = useCallback(async () => {
+    if (!isOwner || lockUpdating) return;
+    const nextLocked = !roomLocked;
+    setLockUpdating(true);
+    try {
+      const res = await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/lock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ locked: nextLocked }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Could not update room lock.");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not update room lock.", "error");
+    } finally {
+      setLockUpdating(false);
+    }
+  }, [isOwner, lockUpdating, room.code, roomLocked]);
+
+  const kickMember = useCallback(async (member: RoomMemberInfo) => {
+    if (!isOwner || member.role === "owner" || member.user.id === selfUserId) return;
+    if (!window.confirm(`Remove ${member.user.name} from room ${room.code}?`)) return;
+    setKickingUserId(member.user.id);
+    try {
+      const res = await apiFetch(
+        `/api/rooms/${encodeURIComponent(room.code)}/members/${encodeURIComponent(member.user.id)}/kick`,
+        { method: "POST" },
+      );
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Could not remove that member.");
+      setMemberMenuUserId(null);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not remove that member.", "error");
+    } finally {
+      setKickingUserId(null);
+    }
+  }, [isOwner, room.code, selfUserId]);
+
+  const openPanelSurface = useCallback((tab: BottomTab) => {
+    setBottomTab(tab);
+    setBottomOpen(!(hasResultPane && viewMode !== "edit"));
+  }, [hasResultPane, viewMode]);
+
   const runCode = useCallback(async () => {
     if (running) return;
     if (isExecutable && currentExecutionAvailability?.ready === false) {
-      setBottomOpen(true);
-      setBottomTab("output");
+      openPanelSurface("output");
       setExecutionResult({
         status: "unavailable",
         stdout: "",
@@ -208,8 +268,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     if (!code.trim()) return;
 
     setRunning(true);
-    setBottomOpen(true);
-    setBottomTab("output");
+    openPanelSurface("output");
     setExecutionResult(null);
 
     try {
@@ -256,7 +315,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     } finally {
       setRunning(false);
     }
-  }, [currentExecutionAvailability, executionUnavailableMessage, getCurrentContent, isExecutable, running, room.code, setProblemMarkers, state.language, stdin]);
+  }, [currentExecutionAvailability, executionUnavailableMessage, getCurrentContent, isExecutable, openPanelSurface, running, room.code, setProblemMarkers, state.language, stdin]);
 
   useEffect(() => {
     const handleRun = () => {
@@ -334,8 +393,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         problems: [],
       });
       setProblemMarkers([]);
-      setBottomOpen(true);
-      setBottomTab("output");
+      openPanelSurface("output");
       return true;
     } catch (err) {
       const problem = makeJsonProblem(code, err);
@@ -348,11 +406,10 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         problems: [problem],
       });
       setProblemMarkers([problem]);
-      setBottomOpen(true);
-      setBottomTab("problems");
+      openPanelSurface("problems");
       return false;
     }
-  }, [getCurrentContent, makeJsonProblem, setProblemMarkers, state.language]);
+  }, [getCurrentContent, makeJsonProblem, openPanelSurface, setProblemMarkers, state.language]);
 
   const formatJson = useCallback(() => {
     if (state.language !== "json") return;
@@ -381,10 +438,9 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         problems: [problem],
       });
       setProblemMarkers([problem]);
-      setBottomOpen(true);
-      setBottomTab("problems");
+      openPanelSurface("problems");
     }
-  }, [getCurrentContent, makeJsonProblem, setProblemMarkers, state.language]);
+  }, [getCurrentContent, makeJsonProblem, openPanelSurface, setProblemMarkers, state.language]);
 
   const insertStarterTemplate = useCallback(() => {
     const starter = LANGUAGE_STARTERS[state.language as keyof typeof LANGUAGE_STARTERS];
@@ -415,6 +471,71 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
   const problemsCount = executionResult?.problems?.length || 0;
   const errorsCount = executionResult?.problems?.filter(p => p.severity === "error").length || 0;
+  const displayedMembers: RoomMemberInfo[] = currentMembers.length > 0
+    ? currentMembers
+    : state.users.map((presence) => ({
+        user: presence.user,
+        role: presence.user.id === selfUserId ? currentRole : "editor",
+        joinedAt: new Date(presence.joinedAt).toISOString(),
+        online: true,
+      }));
+
+  const renderInputPanel = () => (
+    <div className="flex h-full flex-col p-3">
+      <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+        Stdin (input for program)
+      </div>
+      <textarea
+        value={stdin}
+        onChange={(event) => setStdin(event.target.value)}
+        placeholder="Enter input for your program, e.g.&#10;5&#10;10&#10;20"
+        className="flex-1 resize-none rounded border border-white/10 bg-[#0b0e14] p-3 font-mono text-xs text-slate-200 outline-none focus:border-teal-400/50"
+      />
+      <div className="mt-2 text-[10px] text-slate-600">
+        Max 10KB, will be fed to program&apos;s stdin
+      </div>
+    </div>
+  );
+
+  const renderResultPanel = (withHeader = false) => (
+    <div className="flex h-full min-h-0 flex-col bg-[#0a0d13]">
+      {withHeader && (
+        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-white/[0.06] px-3 text-xs font-semibold text-slate-400">
+          <TerminalIcon className="h-3.5 w-3.5 text-cyan-200" />
+          <span>{bottomTab === "output" ? "Output" : bottomTab === "problems" ? "Problems" : "Input"}</span>
+          {bottomTab === "problems" && problemsCount > 0 && (
+            <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-slate-300">
+              {problemsCount}
+            </span>
+          )}
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
+        {bottomTab === "output" && (
+          <OutputPanel
+            result={executionResult}
+            running={running}
+            onClear={() => setExecutionResult(null)}
+          />
+        )}
+        {bottomTab === "problems" && (
+          <ProblemsPanel problems={executionResult?.problems || []} onJumpTo={jumpToError} />
+        )}
+        {bottomTab === "input" && renderInputPanel()}
+      </div>
+    </div>
+  );
+
+  const renderCompanionPane = () => {
+    if (hasPreview) {
+      return isMarkdown ? (
+        <MarkdownPreview markdown={previewContent} />
+      ) : (
+        <SafePreview language={isHtml ? "html" : "css"} content={previewContent} />
+      );
+    }
+    return renderResultPanel(true);
+  };
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-[#07090f] text-slate-200">
@@ -466,8 +587,66 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           </span>
         )}
 
+        <span
+          className={clsx(
+            "hidden items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold md:flex",
+            roomLocked
+              ? "border-rose-300/25 bg-rose-300/10 text-rose-200"
+              : "border-emerald-300/20 bg-emerald-300/10 text-emerald-200",
+          )}
+        >
+          {roomLocked ? <Lock className="h-3 w-3" /> : <Unlock className="h-3 w-3" />}
+          {roomLocked ? "Room locked" : "Room open"}
+        </span>
+
         <div className="ml-auto flex items-center gap-2">
-          <PresenceBar users={state.users} selfSessionId={state.selfSessionId} onEditProfile={() => setEditingProfile(true)} />
+          <PresenceBar
+            users={state.users}
+            selfSessionId={state.selfSessionId}
+            selfUserId={selfUserId}
+            onEditProfile={() => setEditingProfile(true)}
+          />
+
+          <button
+            type="button"
+            onClick={() => setMembersOpen((open) => !open)}
+            className={clsx(
+              "flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition",
+              membersOpen
+                ? "border-teal-300/30 bg-teal-300/10 text-teal-100"
+                : "border-white/10 text-slate-300 hover:border-white/20 hover:bg-white/5",
+            )}
+            aria-expanded={membersOpen}
+          >
+            <Users className="h-3.5 w-3.5" />
+            <span className="hidden lg:inline">Members</span>
+            <span className="font-mono text-[10px] text-slate-500">
+              {currentMembers.length || state.users.length}
+            </span>
+          </button>
+
+          {isOwner && (
+            <button
+              type="button"
+              onClick={() => void toggleRoomLock()}
+              disabled={lockUpdating}
+              className={clsx(
+                "hidden items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition md:flex disabled:opacity-60",
+                roomLocked
+                  ? "border-emerald-300/25 text-emerald-200 hover:bg-emerald-300/10"
+                  : "border-rose-300/25 text-rose-200 hover:bg-rose-300/10",
+              )}
+            >
+              {lockUpdating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : roomLocked ? (
+                <Unlock className="h-3.5 w-3.5" />
+              ) : (
+                <Lock className="h-3.5 w-3.5" />
+              )}
+              {roomLocked ? "Unlock Room" : "Lock Room"}
+            </button>
+          )}
 
           <div className="hidden h-5 w-px bg-white/10 md:block" />
 
@@ -571,26 +750,6 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             </button>
           </div>
 
-          {hasPreview && (
-            <div className="hidden items-center rounded-lg border border-white/10 bg-[#11151f] p-0.5 md:flex">
-              {[
-                { id: "edit", icon: Code2, label: "Editor" },
-                { id: "split", icon: Columns2, label: "Split" },
-                { id: "preview", icon: Eye, label: "Preview" },
-              ].map(({ id, icon: Icon, label }) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setManualViewMode(id as ViewMode)}
-                  className={clsx("flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition", viewMode === id ? "bg-teal-500/20 text-teal-200" : "text-slate-400 hover:text-slate-200")}
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  <span className="hidden lg:inline">{label}</span>
-                </button>
-              ))}
-            </div>
-          )}
-
           <div className="hidden items-center gap-1.5 sm:flex">
             <button
               onClick={() => void copyValue(room.code, "code")}
@@ -618,6 +777,209 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         </div>
       </header>
 
+      {membersOpen && (
+        <section className="shrink-0 border-b border-white/[0.06] bg-[#0c1018] px-4 py-3 shadow-lg shadow-black/20">
+          <div className="mx-auto flex max-w-6xl flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                <Users className="h-3.5 w-3.5" />
+                Members
+              </div>
+              <p className="mt-1 text-xs text-slate-500">
+                {roomLocked
+                  ? "Room locked — existing members can keep collaborating."
+                  : "Room open — people with the code can request to join."}
+              </p>
+            </div>
+            {isOwner && (
+              <button
+                type="button"
+                onClick={() => void toggleRoomLock()}
+                disabled={lockUpdating}
+                className={clsx(
+                  "inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition disabled:opacity-60 md:hidden",
+                  roomLocked
+                    ? "border-emerald-300/25 text-emerald-200 hover:bg-emerald-300/10"
+                    : "border-rose-300/25 text-rose-200 hover:bg-rose-300/10",
+                )}
+              >
+                {lockUpdating ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : roomLocked ? (
+                  <Unlock className="h-3.5 w-3.5" />
+                ) : (
+                  <Lock className="h-3.5 w-3.5" />
+                )}
+                {roomLocked ? "Unlock Room" : "Lock Room"}
+              </button>
+            )}
+            <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2 lg:max-w-2xl">
+              {displayedMembers.map((member) => {
+                const isSelfMember = member.user.id === selfUserId;
+                const canKick = isOwner && member.role !== "owner" && !isSelfMember;
+                return (
+                  <div
+                    key={member.user.id}
+                    className="relative flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2"
+                  >
+                    <span
+                      className={clsx(
+                        "h-2.5 w-2.5 shrink-0 rounded-full",
+                        member.online ? "bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.55)]" : "bg-slate-600",
+                      )}
+                    />
+                    <div
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
+                      style={{
+                        backgroundColor: `${member.user.color}24`,
+                        color: member.user.color,
+                        boxShadow: `0 0 0 1px ${member.user.color}66`,
+                      }}
+                    >
+                      {member.user.name.slice(0, 2).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="truncate text-sm font-semibold text-slate-100">
+                          {member.user.name}
+                        </span>
+                        {isSelfMember && (
+                          <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
+                            you
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-2 text-[11px] text-slate-500">
+                        <span>{member.online ? "Online" : "Away"}</span>
+                        {member.role === "owner" && (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/25 bg-amber-300/10 px-1.5 py-0.5 font-semibold text-amber-200">
+                            <Crown className="h-2.5 w-2.5" />
+                            Owner
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {canKick && (
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setMemberMenuUserId((open) => open === member.user.id ? null : member.user.id)
+                          }
+                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-100"
+                          aria-label={`Manage ${member.user.name}`}
+                        >
+                          <MoreVertical className="h-3.5 w-3.5" />
+                        </button>
+                        {memberMenuUserId === member.user.id && (
+                          <div className="absolute right-0 top-full z-50 mt-1 w-32 rounded-lg border border-white/10 bg-[#111722] p-1 shadow-2xl shadow-black/40">
+                            <button
+                              type="button"
+                              onClick={() => void kickMember(member)}
+                              disabled={kickingUserId === member.user.id}
+                              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold text-rose-200 hover:bg-rose-400/10 disabled:opacity-60"
+                            >
+                              {kickingUserId === member.user.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <UserMinus className="h-3.5 w-3.5" />
+                              )}
+                              Kick
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </section>
+      )}
+
+      <nav className="shrink-0 border-b border-white/[0.06] bg-[#0a0d13] px-3 py-2">
+        <div className="flex items-center gap-2 overflow-x-auto">
+          <span className="shrink-0 px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
+            Layout
+          </span>
+          {[
+            { id: "edit", icon: Code2, label: "Editor", disabled: false },
+            { id: "split", icon: Columns2, label: "Split", disabled: !hasCompanionPane },
+            { id: "preview", icon: Eye, label: "Preview", disabled: !hasCompanionPane },
+          ].map(({ id, icon: Icon, label, disabled }) => (
+            <button
+              key={id}
+              type="button"
+              disabled={disabled}
+              onClick={() => setManualViewMode(id as ViewMode)}
+              className={clsx(
+                "flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-45",
+                viewMode === id
+                  ? "border-teal-300/30 bg-teal-300/15 text-teal-100 shadow-[0_0_18px_rgba(45,212,191,0.08)]"
+                  : "border-white/10 bg-white/[0.02] text-slate-400 hover:border-white/20 hover:text-slate-100",
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+
+          <div className="mx-1 h-5 w-px shrink-0 bg-white/10" />
+          <span className="shrink-0 px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
+            Panels
+          </span>
+          {[
+            { id: "output", icon: TerminalIcon, label: "Output" },
+            { id: "problems", icon: Bug, label: "Problems" },
+            { id: "input", icon: TerminalIcon, label: "Input" },
+          ].map(({ id, icon: Icon, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => openPanelSurface(id as BottomTab)}
+              className={clsx(
+                "flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition",
+                bottomTab === id
+                  ? "border-cyan-300/30 bg-cyan-300/10 text-cyan-100"
+                  : "border-white/10 bg-white/[0.02] text-slate-400 hover:border-white/20 hover:text-slate-100",
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+              {id === "problems" && problemsCount > 0 && (
+                <span className={clsx(
+                  "rounded px-1.5 text-[10px]",
+                  errorsCount > 0 ? "bg-rose-400/20 text-rose-200" : "bg-white/10 text-slate-300",
+                )}>
+                  {problemsCount}
+                </span>
+              )}
+            </button>
+          ))}
+          <span className="ml-auto hidden shrink-0 items-center gap-1.5 rounded-full border border-white/10 px-2 py-1 text-[10px] font-semibold text-slate-500 sm:flex">
+            {roomLocked ? <Lock className="h-3 w-3 text-rose-300" /> : <Unlock className="h-3 w-3 text-emerald-300" />}
+            {roomLocked ? "Room locked" : "Room open"}
+          </span>
+        </div>
+      </nav>
+
+      {state.accessRevokedMessage && (
+        <div className="shrink-0 border-b border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="h-4 w-4" />
+            <span className="font-semibold">{state.accessRevokedMessage}</span>
+            <button
+              type="button"
+              onClick={exitRoom}
+              className="ml-auto rounded-lg border border-rose-200/20 px-3 py-1 text-xs font-semibold hover:bg-rose-200/10"
+            >
+              Back home
+            </button>
+          </div>
+        </div>
+      )}
+
       {showSettings && (
         <div className="border-b border-white/[0.06] bg-[#0f131d] px-4 py-3">
           <div className="flex flex-wrap items-center gap-4 text-xs">
@@ -643,14 +1005,46 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
       {/* Workspace */}
       <main className="flex min-h-0 flex-1 flex-col">
-        <div className="flex min-h-0 flex-1">
-          {(viewMode !== "preview" || !hasPreview) && (
-            <div className={clsx("min-w-0", hasPreview && viewMode === "split" ? "w-1/2" : "w-full")}>
-              {connected || state.revision > 0 ? (
+        <div
+          className={clsx(
+            "flex min-h-0 flex-1",
+            viewMode === "split" && hasCompanionPane
+              ? "flex-col lg:flex-row"
+              : "flex-col",
+          )}
+        >
+          {(viewMode !== "preview" || !hasCompanionPane) && (
+            <div
+              className={clsx(
+                "min-h-0 min-w-0",
+                viewMode === "split" && hasCompanionPane
+                  ? "h-1/2 lg:h-full lg:w-1/2"
+                  : "h-full w-full flex-1",
+              )}
+            >
+              {state.accessRevokedMessage ? (
+                <div className="flex h-full items-center justify-center bg-[#0b0e14] p-6 text-center">
+                  <div className="max-w-md rounded-2xl border border-rose-400/25 bg-rose-400/10 p-6 text-rose-100">
+                    <ShieldAlert className="mx-auto mb-3 h-8 w-8" />
+                    <h2 className="text-lg font-bold">Room access removed</h2>
+                    <p className="mt-2 text-sm text-rose-100/80">
+                      {state.accessRevokedMessage}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={exitRoom}
+                      className="mt-5 rounded-lg bg-rose-300 px-4 py-2 text-sm font-semibold text-[#2a0d12] hover:bg-rose-200"
+                    >
+                      Back home
+                    </button>
+                  </div>
+                </div>
+              ) : connected || state.revision > 0 ? (
                 <CollaborativeMonaco
                   language={state.language}
                   users={state.users}
                   selfSessionId={state.selfSessionId}
+                  selfUserId={selfUserId}
                   setBridge={setBridge}
                   submitLocalOps={submitLocalOps}
                   publishPresence={publishPresence}
@@ -673,13 +1067,16 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               )}
             </div>
           )}
-          {hasPreview && viewMode !== "edit" && (
-            <div className={clsx("min-w-0 border-l border-white/[0.06] bg-[#0a0d13]", viewMode === "split" ? "w-1/2" : "w-full")}>
-              {isMarkdown ? (
-                <MarkdownPreview markdown={previewContent} />
-              ) : (
-                <SafePreview language={isHtml ? "html" : "css"} content={previewContent} />
+          {hasCompanionPane && viewMode !== "edit" && (
+            <div
+              className={clsx(
+                "min-h-0 min-w-0 border-white/[0.06] bg-[#0a0d13]",
+                viewMode === "split"
+                  ? "h-1/2 border-t lg:h-full lg:w-1/2 lg:border-l lg:border-t-0"
+                  : "h-full w-full flex-1",
               )}
+            >
+              {renderCompanionPane()}
             </div>
           )}
         </div>
@@ -716,20 +1113,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               </div>
             </div>
             <div className="min-h-0 flex-1">
-              {bottomTab === "output" && <OutputPanel result={executionResult} running={running} onClear={() => setExecutionResult(null)} />}
-              {bottomTab === "problems" && <ProblemsPanel problems={executionResult?.problems || []} onJumpTo={jumpToError} />}
-              {bottomTab === "input" && (
-                <div className="flex h-full flex-col p-3">
-                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Stdin (input for program)</div>
-                  <textarea
-                    value={stdin}
-                    onChange={(e) => setStdin(e.target.value)}
-                    placeholder="Enter input for your program, e.g.&#10;5&#10;10&#10;20"
-                    className="flex-1 resize-none rounded border border-white/10 bg-[#0b0e14] p-3 font-mono text-xs text-slate-200 outline-none focus:border-teal-400/50"
-                  />
-                  <div className="mt-2 text-[10px] text-slate-600">Max 10KB, will be fed to program&apos;s stdin</div>
-                </div>
-              )}
+              {renderResultPanel()}
             </div>
           </div>
         )}

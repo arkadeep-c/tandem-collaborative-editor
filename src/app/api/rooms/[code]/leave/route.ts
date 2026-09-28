@@ -3,7 +3,7 @@ import { and, asc, eq, ne } from "drizzle-orm";
 import { db, isUsingLocalDb } from "@/db";
 import { roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
-import { requireRoomAccess } from "@/lib/roomAccess";
+import { listRoomMembers, requireRoomAccess } from "@/lib/roomAccess";
 
 export const dynamic = "force-dynamic";
 
@@ -20,12 +20,6 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
-
-  const room = await roomEngine.getRoom(access.code);
-  if (typeof room?.notifyMemberLeft === "function") {
-    room.notifyMemberLeft(access.session.user);
-  }
-  room?.leaveUser(access.session.user.id);
 
   try {
     if (isUsingLocalDb()) {
@@ -77,6 +71,16 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   } catch (err) {
     console.error("[leave] failed", err);
     return NextResponse.json({ error: "Failed to leave room." }, { status: 500 });
+  }
+
+  const room = await roomEngine.getRoom(access.code);
+  room?.leaveUser(access.session.user.id);
+  const members = await listRoomMembers(
+    access.room.id,
+    room ? [...room.users.values()] : [],
+  );
+  if (typeof room?.notifyMemberLeft === "function") {
+    room.notifyMemberLeft(access.session.user, members);
   }
 
   return NextResponse.json({ ok: true });

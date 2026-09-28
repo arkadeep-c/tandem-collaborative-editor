@@ -24,6 +24,7 @@ export async function GET(request: NextRequest) {
       title: documents.title,
       language: documents.language,
       roomId: rooms.id,
+      locked: rooms.locked,
       createdAt: rooms.createdAt,
       updatedAt: rooms.updatedAt,
     })
@@ -57,6 +58,7 @@ export async function GET(request: NextRequest) {
     title: m.title,
     language: m.language,
     role: m.role === "owner" ? "owner" : "editor",
+    locked: Boolean(m.locked),
     memberCount: memberCounts.get(m.roomId) ?? 1,
     activeUsers: roomEngine.getActiveCount(m.code),
     createdAt: m.createdAt.toISOString(),
