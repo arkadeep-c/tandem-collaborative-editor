@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   executeCode,
   getExecutionAvailability,
+  getHostExecutionPath,
   parseBashErrors,
   parseCppErrors,
   parseJavaErrors,
@@ -44,6 +45,19 @@ describe("execution language registry", () => {
     expect(ids).not.toContain("sql");
     expect(ids).not.toContain("yaml");
     expect(ids).toContain("bash");
+  });
+});
+
+describe("host executor environment", () => {
+  it("preserves the host PATH for Windows Docker CLI discovery", () => {
+    const windowsPath = "C:\\Windows\\System32;C:\\Tools\\Docker\\bin";
+    expect(getHostExecutionPath("win32", windowsPath)).toBe(windowsPath);
+    expect(getHostExecutionPath("win32", windowsPath)).toContain("Docker");
+    expect(getHostExecutionPath("win32", windowsPath)).not.toBe("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+  });
+
+  it("keeps the restricted Linux PATH for Linux host sandbox commands", () => {
+    expect(getHostExecutionPath("linux", "/custom/docker/bin")).toBe("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
   });
 });
 

@@ -14,6 +14,14 @@ const MEMORY_LIMIT_BYTES = 768 * 1024 * 1024;
 const FILE_SIZE_BLOCKS = 4096; // 2MB with POSIX 512-byte blocks.
 const PROCESS_LIMIT = 96;
 const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+export function getHostExecutionPath(
+  hostPlatform: NodeJS.Platform = platform(),
+  hostPath: string | undefined = process.env.PATH,
+): string {
+  return hostPlatform === "win32" ? hostPath ?? "" : SAFE_PATH;
+}
+
 const JAVA_VM_ARGS = [
   "-Xmx256m",
   "-XX:+UseSerialGC",
@@ -76,7 +84,7 @@ function cleanOutput(text: string, workDir: string): string {
 
 async function commandExists(command: string): Promise<boolean> {
   const result = platform() === "win32"
-    ? await rawSpawn("where", [command], { cwd: tmpdir(), timeoutMs: 1500 })
+    ? await rawSpawn("where.exe", [command], { cwd: tmpdir(), timeoutMs: 1500 })
     : await rawSpawn("/bin/sh", ["-lc", `command -v ${JSON.stringify(command)} >/dev/null 2>&1`], { cwd: tmpdir(), timeoutMs: 1500 });
   return result.exitCode === 0;
 }
@@ -93,7 +101,7 @@ async function rawSpawn(command: string, args: string[], options: SpawnOptions):
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: {
-        PATH: SAFE_PATH,
+        PATH: getHostExecutionPath(),
         HOME: options.cwd,
         TMPDIR: options.cwd,
         TEMP: options.cwd,
