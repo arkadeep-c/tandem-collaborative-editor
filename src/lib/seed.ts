@@ -43,7 +43,7 @@ room.flush(debounce(5_000)); // trailing-edge write to Postgres
 
 ## Languages
 
-Switch the room language in the header — C, C++, Python, JavaScript,
+Switch the room language in the header — C, C++, Java, Python, JavaScript,
 TypeScript, Bash / Shell, Markdown, HTML, CSS, and JSON. The choice syncs
 to every collaborator and persists with the document without replacing content.
 

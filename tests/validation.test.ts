@@ -38,6 +38,7 @@ describe("language registry", () => {
       "python",
       "c",
       "cpp",
+      "java",
       "bash",
       "markdown",
       "html",
@@ -51,7 +52,7 @@ describe("language registry", () => {
 
   it("has explicit starter templates for supported starter languages", async () => {
     const { LANGUAGE_STARTERS } = await import("@/lib/types");
-    for (const id of ["c", "cpp", "python", "javascript", "typescript", "bash", "markdown", "html", "json"]) {
+    for (const id of ["c", "cpp", "java", "python", "javascript", "typescript", "bash", "markdown", "html", "json"]) {
       expect(LANGUAGE_STARTERS[id as keyof typeof LANGUAGE_STARTERS].length).toBeGreaterThan(0);
     }
   });

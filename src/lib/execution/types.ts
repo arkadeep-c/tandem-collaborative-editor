@@ -7,7 +7,7 @@ import {
 
 export type ExecutionLanguage = Extract<
   LanguageId,
-  "c" | "cpp" | "python" | "javascript" | "typescript" | "bash"
+  "c" | "cpp" | "java" | "python" | "javascript" | "typescript" | "bash"
 >;
 
 export type ExecutionStatus =

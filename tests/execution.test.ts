@@ -1,7 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { executeCode, getExecutionAvailability, parseBashErrors, parseCppErrors, parseJsErrors, parsePythonErrors } from "@/lib/execution/executor";
+import {
+  executeCode,
+  getExecutionAvailability,
+  parseBashErrors,
+  parseCppErrors,
+  parseJavaErrors,
+  parseJavaRuntimeErrors,
+  parseJsErrors,
+  parsePythonErrors,
+} from "@/lib/execution/executor";
 import { EXECUTABLE_LANGUAGES, isExecutionLanguage, LANGUAGE_CONFIG } from "@/lib/execution/types";
 import { LANGUAGE_OPTIONS } from "@/lib/types";
+
+let cachedJavaAvailability: Promise<{ ready: boolean; reason?: string }> | null = null;
+
+async function javaAvailability(): Promise<{ ready: boolean; reason?: string }> {
+  cachedJavaAvailability ??= getExecutionAvailability().then((availability) => availability.languages.java);
+  return cachedJavaAvailability;
+}
+
+async function runJavaWhenAvailable(code: string, stdin?: string) {
+  const availability = await javaAvailability();
+  if (!availability.ready) return { skipped: true as const, availability };
+  return { skipped: false as const, result: await executeCode("java", code, stdin) };
+}
 
 describe("execution language registry", () => {
   it("keeps visible executable languages aligned with the executor", () => {
@@ -13,9 +35,10 @@ describe("execution language registry", () => {
     }
   });
 
-  it("does not advertise unsupported V1 languages", () => {
+  it("advertises only supported executable V1 languages", () => {
     const ids = LANGUAGE_OPTIONS.map((option) => option.id);
-    expect(ids).not.toContain("java");
+    expect(ids).toContain("java");
+    expect(isExecutionLanguage("java")).toBe(true);
     expect(ids).not.toContain("go");
     expect(ids).not.toContain("rust");
     expect(ids).not.toContain("sql");
@@ -28,6 +51,34 @@ describe("execution diagnostics parsers", () => {
   it("parses C/C++ compiler diagnostics", () => {
     expect(parseCppErrors("main.cpp:12:9: error: expected ';' before '}' token", "main.cpp")).toEqual([
       expect.objectContaining({ file: "main.cpp", line: 12, column: 9, severity: "error" }),
+    ]);
+  });
+
+  it("parses Java compiler diagnostics with line and column", () => {
+    const stderr = [
+      "Main.java:6: error: ';' expected",
+      "        System.out.println(\"oops\")",
+      "                                  ^",
+      "1 error",
+    ].join("\n");
+    expect(parseJavaErrors(stderr, "Main.java")).toEqual([
+      expect.objectContaining({
+        file: "Main.java",
+        line: 6,
+        column: 35,
+        severity: "error",
+        message: "Java compiler error: ';' expected",
+      }),
+    ]);
+  });
+
+  it("parses Java runtime stack locations", () => {
+    const stderr = [
+      'Exception in thread "main" java.lang.RuntimeException: boom',
+      "\tat Main.main(Main.java:4)",
+    ].join("\n");
+    expect(parseJavaRuntimeErrors(stderr, "Main.java")).toEqual([
+      expect.objectContaining({ file: "Main.java", line: 4, message: 'Exception in thread "main" java.lang.RuntimeException: boom' }),
     ]);
   });
 
@@ -53,6 +104,117 @@ describe("execution diagnostics parsers", () => {
   });
 });
 
+describe("Java execution", () => {
+  it("executes Hello World through the sandbox when Java is available", async () => {
+    const execution = await runJavaWhenAvailable(`public class Main {
+    public static void main(String[] args) {
+        System.out.println("Hello, Tandem!");
+    }
+}
+`);
+    if (execution.skipped) {
+      expect(execution.availability.ready).toBe(false);
+      expect(execution.availability.reason).toBeTruthy();
+      return;
+    }
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout.trim()).toBe("Hello, Tandem!");
+    expect(execution.result.stderr).toBe("");
+    expect(execution.result.exitCode).toBe(0);
+  }, 20_000);
+
+  it("executes Java arithmetic", async () => {
+    const execution = await runJavaWhenAvailable(`public class Main {
+    public static void main(String[] args) {
+        int left = 6;
+        int right = 7;
+        System.out.println(left * right);
+    }
+}
+`);
+    if (execution.skipped) {
+      expect(execution.availability.ready).toBe(false);
+      return;
+    }
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout.trim()).toBe("42");
+  }, 20_000);
+
+  it("passes stdin to Java Scanner", async () => {
+    const execution = await runJavaWhenAvailable(`import java.util.Scanner;
+
+public class Main {
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+        String name = scanner.nextLine();
+        int value = scanner.nextInt();
+        System.out.println(name + ":" + (value * 2));
+    }
+}
+`, "Tandem\n21\n");
+    if (execution.skipped) {
+      expect(execution.availability.ready).toBe(false);
+      return;
+    }
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout.trim()).toBe("Tandem:42");
+  }, 20_000);
+
+  it("returns Java compilation diagnostics as Problems", async () => {
+    const execution = await runJavaWhenAvailable(`public class Main {
+    public static void main(String[] args) {
+        System.out.println("missing semicolon")
+    }
+}
+`);
+    if (execution.skipped) {
+      expect(execution.availability.ready).toBe(false);
+      return;
+    }
+    expect(execution.result.status).toBe("compile_error");
+    expect(execution.result.stdout).toBe("");
+    expect(execution.result.stderr).toContain("Main.java:3: error");
+    expect(execution.result.stderr).not.toMatch(/tandem-exec|\/tmp\//i);
+    expect(execution.result.problems).toEqual([
+      expect.objectContaining({ file: "Main.java", line: 3, severity: "error" }),
+    ]);
+  }, 20_000);
+
+  it("captures Java runtime errors without host internals", async () => {
+    const execution = await runJavaWhenAvailable(`public class Main {
+    public static void main(String[] args) {
+        throw new RuntimeException("boom");
+    }
+}
+`);
+    if (execution.skipped) {
+      expect(execution.availability.ready).toBe(false);
+      return;
+    }
+    expect(execution.result.status).toBe("runtime_error");
+    expect(execution.result.stdout).toBe("");
+    expect(execution.result.stderr).toContain("RuntimeException: boom");
+    expect(execution.result.stderr).toContain("Main.java:3");
+    expect(execution.result.stderr).not.toMatch(/docker|tandem-exec|\/tmp\//i);
+  }, 20_000);
+
+  it("times out runaway Java programs", async () => {
+    const execution = await runJavaWhenAvailable(`public class Main {
+    public static void main(String[] args) {
+        while (true) {
+        }
+    }
+}
+`);
+    if (execution.skipped) {
+      expect(execution.availability.ready).toBe(false);
+      return;
+    }
+    expect(execution.result.status).toBe("timeout");
+    expect(execution.result.timedOut).toBe(true);
+  }, 25_000);
+});
+
 describe("execution fail-closed mode", () => {
   it("reports execution availability as unconfigured when disabled", async () => {
     const previous = process.env.TANDEM_EXECUTION_BACKEND;
@@ -62,6 +224,7 @@ describe("execution fail-closed mode", () => {
       expect(availability.configured).toBe(false);
       expect(availability.backend).toBeNull();
       expect(availability.languages.c.ready).toBe(false);
+      expect(availability.languages.java.ready).toBe(false);
     } finally {
       if (previous === undefined) delete process.env.TANDEM_EXECUTION_BACKEND;
       else process.env.TANDEM_EXECUTION_BACKEND = previous;
@@ -72,7 +235,7 @@ describe("execution fail-closed mode", () => {
     const previous = process.env.TANDEM_EXECUTION_BACKEND;
     process.env.TANDEM_EXECUTION_BACKEND = "disabled";
     try {
-      const result = await executeCode("bash", 'echo "hi"');
+      const result = await executeCode("java", 'public class Main { public static void main(String[] args) { System.out.println("hi"); } }');
       expect(result.status).toBe("unavailable");
       expect(result.stderr).not.toMatch(/ENOENT|spawn/i);
     } finally {

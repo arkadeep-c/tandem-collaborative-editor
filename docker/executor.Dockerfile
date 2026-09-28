@@ -10,6 +10,7 @@ RUN apt-get update \
     bash \
     ca-certificates \
     build-essential \
+    openjdk-17-jdk-headless \
     python3 \
   && rm -rf /var/lib/apt/lists/*
 

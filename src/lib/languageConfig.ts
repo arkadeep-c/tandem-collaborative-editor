@@ -1,6 +1,7 @@
 export type LanguageId =
   | "c"
   | "cpp"
+  | "java"
   | "python"
   | "javascript"
   | "typescript"
@@ -54,6 +55,17 @@ export const LANGUAGE_DEFINITIONS: readonly LanguageDefinition[] = [
     needsCompilation: true,
     kind: "code",
     starter: `// Starter C++ template. Safe to edit or delete.\n\n#include <iostream>\n\nint main() {\n    std::cout << "Hello from Tandem C++" << std::endl;\n    return 0;\n}\n`,
+  },
+  {
+    id: "java",
+    label: "Java",
+    accent: "#f87171",
+    extension: "java",
+    monacoLanguage: "java",
+    executable: true,
+    needsCompilation: true,
+    kind: "code",
+    starter: `public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, Tandem!");\n    }\n}\n`,
   },
   {
     id: "python",

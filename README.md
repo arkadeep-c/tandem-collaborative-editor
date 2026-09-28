@@ -20,6 +20,7 @@ The Run button is available for:
 
 - C (`gcc`)
 - C++ (`g++`)
+- Java (`javac` → `java Main`)
 - Python (`python3`)
 - JavaScript (`node`)
 - TypeScript (server-side TypeScript transpile, then `node`)
@@ -36,7 +37,7 @@ instead of running user code directly on the app host.
 - CSS — limited sandboxed iframe sample preview with scripts disabled
 - JSON — explicit **Validate** and **Format** actions with diagnostics
 
-Unsupported languages such as Java, Go, Rust, SQL, YAML, Kotlin, and PHP are not
+Unsupported languages such as Go, Rust, SQL, YAML, Kotlin, and PHP are not
 advertised in V1.
 
 ---
@@ -220,6 +221,7 @@ Execution output is not just raw compiler text. Tandem parses common diagnostics
 where practical:
 
 - C/C++: `file:line:column: error|warning: message`
+- Java: `Main.java:line: error|warning: message` plus caret columns when available
 - Python: traceback file/line and final exception
 - JavaScript/TypeScript: stack locations and common error classes
 - Bash: `script.sh: line N: message`
@@ -327,7 +329,7 @@ Manual browser acceptance should verify:
 - create/join/rename/leave/delete
 - two-browser collaboration and presence
 - save/refresh persistence
-- C, C++, Python, JavaScript, TypeScript, Bash execution with stdout/stderr
+- C, C++, Java, Python, JavaScript, TypeScript, Bash execution with stdout/stderr
 - compile/runtime/timeout/output-limit diagnostics
 - Markdown preview, HTML/CSS safe preview, JSON validate/format
 - copy code/link and download
@@ -340,7 +342,7 @@ Manual browser acceptance should verify:
 - Tandem is a single-document room editor, not a multi-file IDE.
 - The realtime engine is single-process and not a distributed OT service.
 - SQL execution is not supported.
-- Java/Go/Rust/YAML are not V1 languages.
+- Go/Rust/YAML are not V1 languages.
 - HTML/CSS preview is deliberately limited and sandboxed; scripts are disabled.
 - The Linux namespace execution backend is for local/preview use. Use a dedicated
   Docker sandbox image for production.

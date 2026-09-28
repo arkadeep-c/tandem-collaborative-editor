@@ -14,6 +14,15 @@ const MEMORY_LIMIT_BYTES = 768 * 1024 * 1024;
 const FILE_SIZE_BLOCKS = 4096; // 2MB with POSIX 512-byte blocks.
 const PROCESS_LIMIT = 96;
 const SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const JAVA_VM_ARGS = [
+  "-Xmx256m",
+  "-XX:+UseSerialGC",
+  "-XX:MaxMetaspaceSize=128m",
+  "-XX:ReservedCodeCacheSize=32m",
+  "-XX:-UsePerfData",
+  "-Djava.io.tmpdir=.",
+] as const;
+const JAVAC_VM_ARGS = JAVA_VM_ARGS.map((arg) => `-J${arg}`);
 
 interface SpawnResult {
   stdout: string;
@@ -341,6 +350,7 @@ export async function getExecutionAvailability(): Promise<ExecutionAvailability>
 const EXECUTION_TOOL_REQUIREMENTS: Record<ExecutionLanguage, string[]> = {
   c: ["gcc"],
   cpp: ["g++"],
+  java: ["javac", "java"],
   python: ["python3"],
   javascript: ["node"],
   typescript: ["node"],
@@ -373,6 +383,51 @@ export function parseCppErrors(stderr: string, filename: string): ExecutionProbl
     });
   }
   return problems;
+}
+
+
+export function parseJavaErrors(stderr: string, filename: string): ExecutionProblem[] {
+  const problems: ExecutionProblem[] = [];
+  const lines = stderr.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(.+?\.java):(\d+):\s*(error|warning):\s*(.*)$/);
+    if (!match) continue;
+    const [, file, lineStr, severityRaw, message] = match;
+    if (!(file === filename || file.endsWith(`/${filename}`) || file.endsWith(`\\${filename}`) || file.endsWith(".java"))) {
+      continue;
+    }
+
+    const caretLine = lines[index + 2] ?? "";
+    const caretIndex = caretLine.indexOf("^");
+    const column = caretIndex >= 0 ? caretIndex + 1 : undefined;
+    const severity = severityRaw === "warning" ? "warning" : "error";
+    problems.push({
+      file: filename,
+      line: Number(lineStr),
+      column,
+      message: `Java compiler ${severity}: ${message.trim()}`,
+      severity,
+    });
+  }
+  return problems;
+}
+
+export function parseJavaRuntimeErrors(stderr: string, filename: string): ExecutionProblem[] {
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const message = lines.find((line) => !line.startsWith("at ")) ?? "Java runtime error";
+  for (const line of lines) {
+    const match = line.match(/\(([^():]+\.java):(\d+)\)/);
+    if (!match) continue;
+    const file = match[1];
+    if (!(file === filename || file.endsWith(`/${filename}`) || file.endsWith(`\\${filename}`))) continue;
+    return [{
+      file: filename,
+      line: Number(match[2]),
+      message,
+      severity: "error",
+    }];
+  }
+  return [];
 }
 
 export function parsePythonErrors(stderr: string, filename: string): ExecutionProblem[] {
@@ -644,6 +699,44 @@ export async function executeCode(
           exitCode: result.exitCode,
           duration: Date.now() - start,
           problems: [],
+          timedOut: result.timedOut,
+          outputTruncated: result.outputTruncated,
+        };
+      }
+
+      case "java": {
+        const filename = "Main.java";
+        await fs.writeFile(join(workDir, filename), code, "utf8");
+        const compiled = await compile("javac", [...JAVAC_VM_ARGS, filename]);
+        if (compiled.exitCode !== 0 || compiled.spawnError || compiled.timedOut || compiled.outputTruncated) {
+          const stderr = compiled.spawnError ? "Java compiler is unavailable in the execution sandbox." : compiled.stderr;
+          const status = compiled.spawnError
+            ? "unavailable"
+            : compiled.timedOut
+              ? "timeout"
+              : compiled.outputTruncated
+                ? "output_limit"
+                : "compile_error";
+          return {
+            status,
+            stdout: "",
+            stderr,
+            exitCode: compiled.exitCode,
+            duration: Date.now() - start,
+            compilationOutput: stderr,
+            problems: parseJavaErrors(stderr, filename),
+            timedOut: compiled.timedOut,
+            outputTruncated: compiled.outputTruncated,
+          };
+        }
+        const result = await run("java", [...JAVA_VM_ARGS, "Main"]);
+        return {
+          status: statusFromRun(result),
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          duration: Date.now() - start,
+          problems: parseJavaRuntimeErrors(result.stderr, filename),
           timedOut: result.timedOut,
           outputTruncated: result.outputTruncated,
         };
