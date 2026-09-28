@@ -22,6 +22,9 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   }
 
   const room = await roomEngine.getRoom(access.code);
+  if (typeof room?.notifyMemberLeft === "function") {
+    room.notifyMemberLeft(access.session.user);
+  }
   room?.leaveUser(access.session.user.id);
 
   try {

@@ -98,6 +98,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     ? executionAvailability?.languages[state.language as keyof ExecutionAvailability["languages"]]
     : null;
   const executionReady = !isExecutable || currentExecutionAvailability?.ready !== false;
+  const executionUnavailableMessage =
+    "Code execution is unavailable because the Tandem Docker execution sandbox is not configured. Configure the sandbox locally, then refresh execution readiness.";
 
   const latestMirrorRef = useRef("");
   const mirrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -193,7 +195,9 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       setExecutionResult({
         status: "unavailable",
         stdout: "",
-        stderr: currentExecutionAvailability.reason ?? "Code execution is unavailable because the required execution runtime is not configured.",
+        stderr: currentExecutionAvailability.reason
+          ? `${executionUnavailableMessage}\n\n${currentExecutionAvailability.reason}`
+          : executionUnavailableMessage,
         exitCode: null,
         duration: 0,
         problems: [],
@@ -252,7 +256,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     } finally {
       setRunning(false);
     }
-  }, [currentExecutionAvailability, getCurrentContent, isExecutable, running, room.code, setProblemMarkers, state.language, stdin]);
+  }, [currentExecutionAvailability, executionUnavailableMessage, getCurrentContent, isExecutable, running, room.code, setProblemMarkers, state.language, stdin]);
 
   useEffect(() => {
     const handleRun = () => {

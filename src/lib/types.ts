@@ -101,6 +101,8 @@ export type ServerEvent =
     }
   | { type: "presence"; user: PresenceState }
   | { type: "leave"; sessionId: string; userId: string }
+  | { type: "member_join"; user: ClientUser }
+  | { type: "member_leave"; user: ClientUser }
   | { type: "meta"; title?: string; language?: string }
   | { type: "saved"; revision: number; savedAt: string; mode: "redis" | "memory" }
   | { type: "error"; message: string };

@@ -59,6 +59,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
 
   const existing = await getMembership(found.room.id, session.user.id);
   let grantedRole = existing?.role ?? "editor";
+  let insertedMembership = false;
   if (!existing) {
     const [anyMember] = await (db as any)
       .select({ userId: roomMembers.userId })
@@ -83,6 +84,14 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
       if (grantedRole === "owner") {
         await (db as any).update(rooms).set({ ownerId: session.user.id, updatedAt: new Date() }).where(eq(rooms.id, found.room.id));
       }
+    }
+    insertedMembership = true;
+  }
+
+  if (insertedMembership) {
+    const activeRoom = await roomEngine.getRoom(code);
+    if (typeof activeRoom?.notifyMemberJoined === "function") {
+      activeRoom.notifyMemberJoined(session.user);
     }
   }
 

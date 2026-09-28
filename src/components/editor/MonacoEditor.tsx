@@ -65,6 +65,7 @@ export default function MonacoEditor({
   const styleTagRef = useRef<HTMLStyleElement | null>(null);
   const lastEditAtRef = useRef(0);
   const presenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* Keep latest callbacks in refs so Monaco listeners never re-subscribe. */
   const submitLocalOpsRef = useRef(submitLocalOps);
@@ -76,6 +77,13 @@ export default function MonacoEditor({
     publishPresenceRef.current = publishPresence;
     onMirrorRef.current = onMirror;
   }, [submitLocalOps, publishPresence, onMirror]);
+
+  useEffect(() => {
+    return () => {
+      if (presenceTimeoutRef.current) clearTimeout(presenceTimeoutRef.current);
+      if (typingStopTimeoutRef.current) clearTimeout(typingStopTimeoutRef.current);
+    };
+  }, []);
 
   /* ---------------------------------------------------------------- */
   /* Theme                                                             */
@@ -148,6 +156,15 @@ export default function MonacoEditor({
     }, PRESENCE_THROTTLE_MS);
   }, []);
 
+  const scheduleTypingStop = useCallback(() => {
+    if (typingStopTimeoutRef.current) clearTimeout(typingStopTimeoutRef.current);
+    typingStopTimeoutRef.current = setTimeout(() => {
+      typingStopTimeoutRef.current = null;
+      lastEditAtRef.current = 0;
+      schedulePresencePush();
+    }, TYPING_WINDOW_MS + PRESENCE_THROTTLE_MS);
+  }, [schedulePresencePush]);
+
   const handleMount: OnMount = useCallback(
     (ed, monaco) => {
       editorRef.current = ed;
@@ -180,6 +197,7 @@ export default function MonacoEditor({
           lastEditAtRef.current = Date.now();
           submitLocalOpsRef.current(ops);
           schedulePresencePush();
+          scheduleTypingStop();
         }
       });
 
@@ -197,7 +215,7 @@ export default function MonacoEditor({
       });
       ed.focus();
     },
-    [schedulePresencePush, onEditorMount],
+    [schedulePresencePush, scheduleTypingStop, onEditorMount],
   );
 
   /* ---------------------------------------------------------------- */

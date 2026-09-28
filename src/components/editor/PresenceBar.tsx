@@ -46,6 +46,14 @@ export default function PresenceBar({
   ).sort((a, b) => a.joinedAt - b.joinedAt);
   const visible = deduped.slice(0, MAX_VISIBLE);
   const overflow = deduped.length - visible.length;
+  const remoteTyping = deduped.filter(
+    (presence) => presence.sessionId !== selfSessionId && presence.typing,
+  );
+  const typingLabel = remoteTyping.length === 0
+    ? null
+    : remoteTyping.length === 1
+      ? `${remoteTyping[0]!.user.name} is typing`
+      : `${remoteTyping.slice(0, 2).map((presence) => presence.user.name).join(", ")} are typing`;
 
   return (
     <div className="flex items-center">
@@ -109,8 +117,13 @@ export default function PresenceBar({
         )}
       </div>
       <span className="ml-3 hidden text-xs font-medium text-slate-500 sm:block">
-        {users.length} online
+        {deduped.length} online
       </span>
+      {typingLabel && (
+        <span className="ml-3 hidden rounded-full border border-teal-300/15 bg-teal-300/10 px-2 py-0.5 text-[11px] font-medium text-teal-100 md:block">
+          {typingLabel}
+        </span>
+      )}
     </div>
   );
 }

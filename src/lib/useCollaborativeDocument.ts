@@ -12,6 +12,7 @@ import type {
   ServerEvent,
   TextOp,
 } from "@/lib/types";
+import { showToast } from "@/components/ui/Toast";
 import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 
 export type ConnectionStatus =
@@ -241,6 +242,14 @@ export function useCollaborativeDocument(roomCode: string) {
           }));
           break;
         }
+        case "member_join": {
+          showToast(`${event.user.name} joined your coding room`, "info");
+          break;
+        }
+        case "member_leave": {
+          showToast(`${event.user.name} left the room`, "info");
+          break;
+        }
         case "meta": {
           setState((prev) => ({
             ...prev,
@@ -348,6 +357,8 @@ export function useCollaborativeDocument(roomCode: string) {
         "op",
         "presence",
         "leave",
+        "member_join",
+        "member_leave",
         "meta",
         "saved",
       ] as const) {

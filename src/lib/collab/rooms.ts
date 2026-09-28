@@ -167,6 +167,14 @@ class Room {
     return true;
   }
 
+  notifyMemberJoined(user: ClientUser): void {
+    this.dispatchExceptUser({ type: "member_join", user }, user.id);
+  }
+
+  notifyMemberLeft(user: ClientUser): void {
+    this.dispatchExceptUser({ type: "member_leave", user }, user.id);
+  }
+
   /* ---------------- operations ---------------- */
 
   async applyOperations(
@@ -381,6 +389,19 @@ class Room {
   private dispatch(event: ServerEvent, exceptConnectionId: string | null): void {
     for (const [connectionId, bucket] of this.subscribers) {
       if (connectionId === exceptConnectionId) continue;
+      for (const fn of bucket) {
+        try {
+          fn(event);
+        } catch {
+          /* a dead subscriber is reaped by its own disconnect handler */
+        }
+      }
+    }
+  }
+
+  private dispatchExceptUser(event: ServerEvent, exceptUserId: string): void {
+    for (const [connectionId, bucket] of this.subscribers) {
+      if (this.users.get(connectionId)?.user.id === exceptUserId) continue;
       for (const fn of bucket) {
         try {
           fn(event);

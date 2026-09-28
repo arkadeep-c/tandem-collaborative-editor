@@ -587,6 +587,17 @@ export default function HomeClient() {
             remote carets, selections, and presence converge in real time.
           </p>
         </section>
+
+        <footer className="mx-auto flex max-w-6xl flex-col gap-2 border-t border-white/[0.06] px-6 py-8 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+          <p>
+            <span className="font-semibold text-slate-300">Tandem</span>
+            <span className="mx-2 text-slate-700">·</span>
+            Built by <span className="text-teal-200">Arkadeep Chakraborty</span>
+          </p>
+          <p className="max-w-md text-slate-600">
+            A real-time collaborative coding environment for focused room-based editing.
+          </p>
+        </footer>
       </div>
 
       {dialog === "create" && (
