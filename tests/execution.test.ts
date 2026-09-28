@@ -4,6 +4,7 @@ import { join } from "path";
 import { describe, expect, it } from "vitest";
 import {
   createDockerContainerName,
+  createDockerRunArgs,
   createDockerWorkspaceMount,
   executeCode,
   getExecutionAvailability,
@@ -95,6 +96,26 @@ describe("Docker execution readiness", () => {
   it("derives a stable Docker container name from the isolated workspace", () => {
     expect(createDockerContainerName("C:\\Users\\Ada\\AppData\\Local\\Temp\\tandem-exec-1234")).toBe("tandem-exec-1234");
     expect(createDockerContainerName("/tmp/tandem-exec-abcd1234")).toBe("tandem-exec-abcd1234");
+  });
+
+  it("passes stdin to docker run without allocating a TTY", () => {
+    const args = createDockerRunArgs({
+      image: "tandem-executor:test",
+      containerName: "tandem-exec-stdin-test",
+      workDir: "C:\\Users\\Ada\\AppData\\Local\\Temp\\tandem-exec-stdin-test",
+      command: "python3",
+      args: ["main.py"],
+      timeoutMs: 10_000,
+    });
+    const imageIndex = args.indexOf("tandem-executor:test");
+    const dockerStdinIndex = args.indexOf("-i");
+
+    expect(args[0]).toBe("run");
+    expect(args[1]).toBe("--rm");
+    expect(dockerStdinIndex).toBeGreaterThanOrEqual(0);
+    expect(dockerStdinIndex).toBeLessThan(imageIndex);
+    expect(args).not.toContain("-t");
+    expect(args[imageIndex + 1]).toBe("-i"); // /usr/bin/env -i still clears the container env.
   });
 
   it("checks language runtimes inside the Docker image instead of on the host", async () => {

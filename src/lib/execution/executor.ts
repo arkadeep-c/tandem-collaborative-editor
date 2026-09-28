@@ -91,6 +91,15 @@ export interface ExecutionAvailabilityProbeOverrides {
   ) => Promise<DockerImageToolProbeResult>;
 }
 
+interface DockerRunArgsOptions {
+  image: string;
+  containerName: string;
+  workDir: string;
+  command: string;
+  args: readonly string[];
+  timeoutMs?: number;
+}
+
 function baseResult(
   status: ExecutionResult["status"],
   stderr: string,
@@ -307,6 +316,64 @@ class LinuxNamespaceBackend implements SandboxBackend {
   }
 }
 
+export function createDockerRunArgs({
+  image,
+  containerName,
+  workDir,
+  command,
+  args,
+  timeoutMs = TIMEOUT_MS,
+}: DockerRunArgsOptions): string[] {
+  const script = [
+    "cd /workspace || exit 111",
+    `ulimit -t ${Math.ceil(timeoutMs / 1000) + 1}`,
+    `ulimit -f ${FILE_SIZE_BLOCKS}`,
+    `ulimit -v ${Math.floor(MEMORY_LIMIT_BYTES / 1024)}`,
+    `ulimit -u ${PROCESS_LIMIT}`,
+    "umask 077",
+    "exec \"$@\"",
+  ].join("; ");
+
+  return [
+    "run",
+    "--rm",
+    "-i",
+    "--name",
+    containerName,
+    "--network",
+    "none",
+    "--cpus",
+    "0.5",
+    "--memory",
+    String(MEMORY_LIMIT_BYTES),
+    "--pids-limit",
+    String(PROCESS_LIMIT),
+    "--read-only",
+    "--tmpfs",
+    "/tmp:rw,noexec,nosuid,size=16m",
+    "-v",
+    createDockerWorkspaceMount(workDir),
+    "-w",
+    "/workspace",
+    "--user",
+    "65534:65534",
+    "--entrypoint",
+    "/usr/bin/env",
+    image,
+    "-i",
+    `PATH=${SAFE_PATH}`,
+    "HOME=/workspace",
+    "TMPDIR=/workspace",
+    "LANG=C.UTF-8",
+    "/bin/bash",
+    "-lc",
+    script,
+    "sandbox",
+    command,
+    ...args,
+  ];
+}
+
 class DockerBackend implements SandboxBackend {
   readonly name = "docker" as const;
   readonly productionSafe = true;
@@ -315,53 +382,15 @@ class DockerBackend implements SandboxBackend {
 
   async run(command: string, args: string[], options: SpawnOptions): Promise<SpawnResult> {
     await fs.chmod(options.cwd, 0o777).catch(() => undefined);
-    const script = [
-      "cd /workspace || exit 111",
-      `ulimit -t ${Math.ceil((options.timeoutMs || TIMEOUT_MS) / 1000) + 1}`,
-      `ulimit -f ${FILE_SIZE_BLOCKS}`,
-      `ulimit -v ${Math.floor(MEMORY_LIMIT_BYTES / 1024)}`,
-      `ulimit -u ${PROCESS_LIMIT}`,
-      "umask 077",
-      "exec \"$@\"",
-    ].join("; ");
     const containerName = createDockerContainerName(options.cwd);
-    const dockerArgs = [
-      "run",
-      "--rm",
-      "--name",
+    const dockerArgs = createDockerRunArgs({
+      image: this.image,
       containerName,
-      "--network",
-      "none",
-      "--cpus",
-      "0.5",
-      "--memory",
-      String(MEMORY_LIMIT_BYTES),
-      "--pids-limit",
-      String(PROCESS_LIMIT),
-      "--read-only",
-      "--tmpfs",
-      "/tmp:rw,noexec,nosuid,size=16m",
-      "-v",
-      createDockerWorkspaceMount(options.cwd),
-      "-w",
-      "/workspace",
-      "--user",
-      "65534:65534",
-      "--entrypoint",
-      "/usr/bin/env",
-      this.image,
-      "-i",
-      `PATH=${SAFE_PATH}`,
-      "HOME=/workspace",
-      "TMPDIR=/workspace",
-      "LANG=C.UTF-8",
-      "/bin/bash",
-      "-lc",
-      script,
-      "sandbox",
+      workDir: options.cwd,
       command,
-      ...args,
-    ];
+      args,
+      timeoutMs: options.timeoutMs,
+    });
     return rawSpawn("docker", dockerArgs, {
       ...options,
       cleanupAfterKill: async () => {
