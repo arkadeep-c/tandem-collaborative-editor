@@ -53,6 +53,25 @@ interface SpawnOptions {
   timeoutMs?: number;
 }
 
+export interface DockerImageToolProbeBackend {
+  readonly image: string;
+}
+
+export interface DockerImageToolProbeResult {
+  imageExists: boolean;
+  availableTools: string[];
+  missingTools: string[];
+  error?: string;
+}
+
+export interface ExecutionAvailabilityProbeOverrides {
+  commandExists?: (command: string) => Promise<boolean>;
+  dockerImageToolProbe?: (
+    backend: DockerImageToolProbeBackend,
+    tools: readonly string[],
+  ) => Promise<DockerImageToolProbeResult>;
+}
+
 function baseResult(
   status: ExecutionResult["status"],
   stderr: string,
@@ -219,7 +238,7 @@ class DockerBackend implements SandboxBackend {
   readonly name = "docker" as const;
   readonly productionSafe = true;
 
-  constructor(private readonly image: string) {}
+  constructor(readonly image: string) {}
 
   async run(command: string, args: string[], options: SpawnOptions): Promise<SpawnResult> {
     await fs.chmod(options.cwd, 0o777).catch(() => undefined);
@@ -271,13 +290,13 @@ class DockerBackend implements SandboxBackend {
   }
 }
 
-async function resolveBackend(): Promise<SandboxBackend | null> {
+async function resolveBackend(hostCommandExists: (command: string) => Promise<boolean> = commandExists): Promise<SandboxBackend | null> {
   const requested = (process.env.TANDEM_EXECUTION_BACKEND || "auto").toLowerCase();
   if (requested === "disabled" || requested === "none") return null;
 
   const image = process.env.TANDEM_EXECUTION_IMAGE;
   if ((requested === "docker" || (requested === "auto" && image)) && image) {
-    if (await commandExists("docker")) return new DockerBackend(image);
+    if (await hostCommandExists("docker")) return new DockerBackend(image);
     return null;
   }
 
@@ -288,7 +307,7 @@ async function resolveBackend(): Promise<SandboxBackend | null> {
     process.env.TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR === "true" ||
     process.env.NODE_ENV !== "production";
 
-  if (platform() === "linux" && allowNamespace && await commandExists("unshare")) {
+  if (platform() === "linux" && allowNamespace && await hostCommandExists("unshare")) {
     return new LinuxNamespaceBackend();
   }
 
@@ -299,20 +318,128 @@ function backendUnavailableMessage(): string {
   return "Code execution is unavailable because no supported isolated execution runtime is configured. Configure a Linux Docker sandbox image with TANDEM_EXECUTION_IMAGE, or use the documented Linux/WSL development sandbox. Unsafe host execution is disabled.";
 }
 
-async function dockerToolExists(backend: SandboxBackend, tool: string): Promise<boolean> {
-  const workDir = await fs.mkdtemp(join(tmpdir(), "tandem-exec-check-"));
-  try {
-    const result = await backend.run("bash", ["-lc", `command -v ${JSON.stringify(tool)} >/dev/null 2>&1`], {
-      cwd: workDir,
-      timeoutMs: 4000,
-    });
-    return result.exitCode === 0;
-  } finally {
-    await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
-  }
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export async function getExecutionAvailability(): Promise<ExecutionAvailability> {
+function uniqueRequiredTools(): string[] {
+  return Array.from(new Set(EXECUTABLE_LANGUAGES.flatMap((language) => EXECUTION_TOOL_REQUIREMENTS[language])));
+}
+
+export function createDockerRuntimeProbeScript(tools: readonly string[]): string {
+  const toolList = tools.map(shellQuote).join(" ");
+  return [
+    "missing=0",
+    `for tool in ${toolList}; do`,
+    "  if command -v \"$tool\" >/dev/null 2>&1; then",
+    "    printf 'READY:%s\\n' \"$tool\"",
+    "  else",
+    "    printf 'MISSING:%s\\n' \"$tool\"",
+    "    missing=1",
+    "  fi",
+    "done",
+    "exit \"$missing\"",
+  ].join("\n");
+}
+
+export function parseDockerRuntimeProbeOutput(stdout: string, tools: readonly string[]): Pick<DockerImageToolProbeResult, "availableTools" | "missingTools"> {
+  const requested = new Set(tools);
+  const available = new Set<string>();
+  const missing = new Set<string>();
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.match(/^(READY|MISSING):(.+)$/);
+    if (!match) continue;
+    const tool = match[2].trim();
+    if (!requested.has(tool)) continue;
+    if (match[1] === "READY") {
+      available.add(tool);
+      missing.delete(tool);
+    } else if (!available.has(tool)) {
+      missing.add(tool);
+    }
+  }
+
+  for (const tool of tools) {
+    if (!available.has(tool)) missing.add(tool);
+  }
+
+  return {
+    availableTools: tools.filter((tool) => available.has(tool)),
+    missingTools: tools.filter((tool) => missing.has(tool)),
+  };
+}
+
+async function probeDockerImageTools(
+  backend: DockerImageToolProbeBackend,
+  tools: readonly string[],
+): Promise<DockerImageToolProbeResult> {
+  const inspect = await rawSpawn("docker", ["image", "inspect", backend.image], {
+    cwd: tmpdir(),
+    timeoutMs: 5000,
+  });
+
+  if (inspect.exitCode !== 0 || inspect.spawnError || inspect.timedOut) {
+    return {
+      imageExists: false,
+      availableTools: [],
+      missingTools: [...tools],
+      error: `Docker execution image "${backend.image}" is not available locally. Build or pull it before enabling Docker execution.`,
+    };
+  }
+
+  const result = await rawSpawn("docker", [
+    "run",
+    "--rm",
+    "--network",
+    "none",
+    "--cpus",
+    "0.5",
+    "--memory",
+    String(MEMORY_LIMIT_BYTES),
+    "--pids-limit",
+    String(PROCESS_LIMIT),
+    "--read-only",
+    "--tmpfs",
+    "/tmp:rw,noexec,nosuid,size=16m",
+    "--user",
+    "65534:65534",
+    "--entrypoint",
+    "/usr/bin/env",
+    backend.image,
+    "-i",
+    `PATH=${SAFE_PATH}`,
+    "HOME=/tmp",
+    "TMPDIR=/tmp",
+    "TEMP=/tmp",
+    "TMP=/tmp",
+    "LANG=C.UTF-8",
+    "/bin/sh",
+    "-lc",
+    createDockerRuntimeProbeScript(tools),
+  ], {
+    cwd: tmpdir(),
+    timeoutMs: 8000,
+  });
+
+  if (result.spawnError || result.timedOut || result.outputTruncated || (result.exitCode !== 0 && result.exitCode !== 1)) {
+    return {
+      imageExists: true,
+      availableTools: [],
+      missingTools: [...tools],
+      error: `Unable to verify runtimes inside Docker execution image "${backend.image}".`,
+    };
+  }
+
+  return {
+    imageExists: true,
+    ...parseDockerRuntimeProbeOutput(result.stdout, tools),
+  };
+}
+
+export async function getExecutionAvailability(
+  probeOverrides: ExecutionAvailabilityProbeOverrides = {},
+): Promise<ExecutionAvailability> {
   const languages = Object.fromEntries(
     EXECUTABLE_LANGUAGES.map((language) => [
       language,
@@ -320,7 +447,8 @@ export async function getExecutionAvailability(): Promise<ExecutionAvailability>
     ]),
   ) as ExecutionAvailability["languages"];
 
-  const backend = await resolveBackend();
+  const hostCommandExists = probeOverrides.commandExists ?? commandExists;
+  const backend = await resolveBackend(hostCommandExists);
   if (!backend) {
     return {
       configured: false,
@@ -331,13 +459,37 @@ export async function getExecutionAvailability(): Promise<ExecutionAvailability>
     };
   }
 
+  if (backend.name === "docker") {
+    const dockerProbe = await (probeOverrides.dockerImageToolProbe ?? probeDockerImageTools)(
+      backend as DockerBackend,
+      uniqueRequiredTools(),
+    );
+    const missingTools = new Set(dockerProbe.missingTools);
+    const probeError = dockerProbe.error;
+
+    for (const language of EXECUTABLE_LANGUAGES) {
+      const missing = EXECUTION_TOOL_REQUIREMENTS[language].filter((tool) => missingTools.has(tool));
+      languages[language] = !probeError && dockerProbe.imageExists && missing.length === 0
+        ? { ready: true }
+        : {
+            ready: false,
+            reason: probeError ?? `Execution runtime missing in configured Docker image: ${missing.join(", ")}.`,
+          };
+    }
+
+    return {
+      configured: Object.values(languages).some((entry) => entry.ready),
+      backend: backend.name,
+      productionSafe: backend.productionSafe,
+      message: probeError,
+      languages,
+    };
+  }
+
   for (const language of EXECUTABLE_LANGUAGES) {
     const missing: string[] = [];
     for (const tool of EXECUTION_TOOL_REQUIREMENTS[language]) {
-      const exists = backend.name === "docker"
-        ? await dockerToolExists(backend, tool)
-        : await commandExists(tool);
-      if (!exists) missing.push(tool);
+      if (!(await hostCommandExists(tool))) missing.push(tool);
     }
     languages[language] = missing.length === 0
       ? { ready: true }

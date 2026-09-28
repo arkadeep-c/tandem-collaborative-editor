@@ -61,6 +61,45 @@ describe("host executor environment", () => {
   });
 });
 
+describe("Docker execution readiness", () => {
+  it("checks language runtimes inside the Docker image instead of on the host", async () => {
+    const previousBackend = process.env.TANDEM_EXECUTION_BACKEND;
+    const previousImage = process.env.TANDEM_EXECUTION_IMAGE;
+    const hostChecks: string[] = [];
+
+    process.env.TANDEM_EXECUTION_BACKEND = "docker";
+    process.env.TANDEM_EXECUTION_IMAGE = "tandem-executor:test";
+
+    try {
+      const availability = await getExecutionAvailability({
+        commandExists: async (command) => {
+          hostChecks.push(command);
+          return command === "docker";
+        },
+        dockerImageToolProbe: async (backend, tools) => {
+          expect(backend.image).toBe("tandem-executor:test");
+          expect(tools).toEqual(expect.arrayContaining(["gcc", "g++", "javac", "java", "python3", "node", "bash"]));
+          return { imageExists: true, availableTools: [...tools], missingTools: [] };
+        },
+      });
+
+      expect(hostChecks).toEqual(["docker"]);
+      expect(hostChecks).not.toEqual(expect.arrayContaining(["gcc", "g++", "javac", "java", "python3", "node", "bash"]));
+      expect(availability.configured).toBe(true);
+      expect(availability.backend).toBe("docker");
+      expect(availability.productionSafe).toBe(true);
+      for (const language of EXECUTABLE_LANGUAGES) {
+        expect(availability.languages[language].ready).toBe(true);
+      }
+    } finally {
+      if (previousBackend === undefined) delete process.env.TANDEM_EXECUTION_BACKEND;
+      else process.env.TANDEM_EXECUTION_BACKEND = previousBackend;
+      if (previousImage === undefined) delete process.env.TANDEM_EXECUTION_IMAGE;
+      else process.env.TANDEM_EXECUTION_IMAGE = previousImage;
+    }
+  });
+});
+
 describe("execution diagnostics parsers", () => {
   it("parses C/C++ compiler diagnostics", () => {
     expect(parseCppErrors("main.cpp:12:9: error: expected ';' before '}' token", "main.cpp")).toEqual([
