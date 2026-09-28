@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createDockerWorkspaceMount,
   executeCode,
   getExecutionAvailability,
   getHostExecutionPath,
@@ -62,6 +63,13 @@ describe("host executor environment", () => {
 });
 
 describe("Docker execution readiness", () => {
+  it("uses a Docker-valid writable workspace bind mount", () => {
+    const mount = createDockerWorkspaceMount("C:\\Users\\Ada\\AppData\\Local\\Temp\\tandem-exec-1234");
+    expect(mount).toBe("C:\\Users\\Ada\\AppData\\Local\\Temp\\tandem-exec-1234:/workspace:rw");
+    expect(mount).not.toContain("nosuid");
+    expect(mount.endsWith(":/workspace:rw")).toBe(true);
+  });
+
   it("checks language runtimes inside the Docker image instead of on the host", async () => {
     const previousBackend = process.env.TANDEM_EXECUTION_BACKEND;
     const previousImage = process.env.TANDEM_EXECUTION_IMAGE;

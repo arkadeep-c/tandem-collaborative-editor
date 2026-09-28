@@ -32,6 +32,10 @@ const JAVA_VM_ARGS = [
 ] as const;
 const JAVAC_VM_ARGS = JAVA_VM_ARGS.map((arg) => `-J${arg}`);
 
+export function createDockerWorkspaceMount(workDir: string): string {
+  return `${workDir}:/workspace:rw`;
+}
+
 interface SpawnResult {
   stdout: string;
   stderr: string;
@@ -266,7 +270,7 @@ class DockerBackend implements SandboxBackend {
       "--tmpfs",
       "/tmp:rw,noexec,nosuid,size=16m",
       "-v",
-      `${options.cwd}:/workspace:rw,nosuid`,
+      createDockerWorkspaceMount(options.cwd),
       "-w",
       "/workspace",
       "--user",
