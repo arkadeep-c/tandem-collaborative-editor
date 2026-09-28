@@ -48,17 +48,6 @@ export default function PresenceBar({
   ).sort((a, b) => a.joinedAt - b.joinedAt);
   const visible = deduped.slice(0, MAX_VISIBLE);
   const overflow = deduped.length - visible.length;
-  const remoteTyping = deduped.filter(
-    (presence) =>
-      presence.sessionId !== selfSessionId &&
-      (!selfUserId || presence.user.id !== selfUserId) &&
-      presence.typing,
-  );
-  const typingLabel = remoteTyping.length === 0
-    ? null
-    : remoteTyping.length === 1
-      ? `${remoteTyping[0]!.user.name} is typing`
-      : `${remoteTyping.slice(0, 2).map((presence) => presence.user.name).join(", ")} are typing`;
 
   return (
     <div className="flex items-center">
@@ -67,6 +56,7 @@ export default function PresenceBar({
           const isSelf =
             presence.sessionId === selfSessionId ||
             Boolean(selfUserId && presence.user.id === selfUserId);
+          const isRemoteTyping = !isSelf && presence.typing;
           return (
             <div
               key={presence.sessionId}
@@ -90,7 +80,7 @@ export default function PresenceBar({
                 aria-label={presence.user.name}
               >
                 {initialsOf(presence.user.name)}
-                {presence.typing && (
+                {isRemoteTyping && (
                   <span
                     className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-[#0b0e14]"
                     style={{ backgroundColor: presence.user.color }}
@@ -109,7 +99,7 @@ export default function PresenceBar({
                       you
                     </span>
                   )}
-                  {presence.typing && (
+                  {isRemoteTyping && (
                     <span className="ml-1.5 text-emerald-400">typing…</span>
                   )}
                 </div>
@@ -126,11 +116,6 @@ export default function PresenceBar({
       <span className="ml-3 hidden text-xs font-medium text-slate-500 sm:block">
         {deduped.length} online
       </span>
-      {typingLabel && (
-        <span className="ml-3 hidden rounded-full border border-teal-300/15 bg-teal-300/10 px-2 py-0.5 text-[11px] font-medium text-teal-100 md:block">
-          {typingLabel}
-        </span>
-      )}
     </div>
   );
 }

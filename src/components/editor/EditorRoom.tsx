@@ -5,12 +5,9 @@ import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Check,
-  Code2,
-  Columns2,
   Copy,
   Crown,
   Database,
-  Eye,
   GitBranch,
   HardDrive,
   Link2,
@@ -26,7 +23,6 @@ import {
   Users,
   ShieldAlert,
   FileJson,
-  Bug,
   Terminal as TerminalIcon,
 } from "lucide-react";
 import clsx from "clsx";
@@ -479,6 +475,28 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         joinedAt: new Date(presence.joinedAt).toISOString(),
         online: true,
       }));
+  const remoteTypingNames = Array.from(
+    state.users.reduce((map, presence) => {
+      if (
+        presence.typing &&
+        presence.sessionId !== state.selfSessionId &&
+        presence.user.id !== selfUserId
+      ) {
+        map.set(presence.user.id, presence.user.name);
+      }
+      return map;
+    }, new Map<string, string>()).values(),
+  );
+  const typingStatus =
+    remoteTypingNames.length === 0
+      ? null
+      : remoteTypingNames.length === 1
+        ? `${remoteTypingNames[0]} is typing…`
+        : remoteTypingNames.length === 2
+          ? `${remoteTypingNames[0]} and ${remoteTypingNames[1]} are typing…`
+          : `${remoteTypingNames[0]}, ${remoteTypingNames[1]}, and ${remoteTypingNames.length - 2} more are typing…`;
+  const panelSurfaceVisible =
+    bottomOpen || (hasResultPane && viewMode !== "edit");
 
   const renderInputPanel = () => (
     <div className="flex h-full flex-col p-3">
@@ -538,7 +556,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   };
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-[#07090f] text-slate-200">
+    <div className="relative flex h-screen flex-col overflow-hidden bg-[#07090f] text-slate-200">
       {/* Header */}
       <header className="flex h-14 shrink-0 items-center gap-3 overflow-x-auto border-b border-white/[0.06] bg-[#0b0e14]/90 px-4 backdrop-blur">
         <button
@@ -551,9 +569,10 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           {leaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowLeft className="h-4 w-4" />}
         </button>
 
-        <span className="flex items-center gap-1.5 rounded-md border border-teal-400/30 bg-teal-400/10 px-2 py-1 font-mono text-[11px] font-bold tracking-[0.15em] text-teal-200">
-          {room.code}
-        </span>
+        <div className="hidden leading-tight sm:block">
+          <div className="text-sm font-bold tracking-tight text-slate-100">Tandem</div>
+          <div className="font-mono text-[10px] tracking-[0.16em] text-teal-300/80">{room.code}</div>
+        </div>
 
         <input
           key={titleShown}
@@ -587,17 +606,6 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           </span>
         )}
 
-        <span
-          className={clsx(
-            "hidden items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold md:flex",
-            roomLocked
-              ? "border-rose-300/25 bg-rose-300/10 text-rose-200"
-              : "border-emerald-300/20 bg-emerald-300/10 text-emerald-200",
-          )}
-        >
-          {roomLocked ? <Lock className="h-3 w-3" /> : <Unlock className="h-3 w-3" />}
-          {roomLocked ? "Room locked" : "Room open"}
-        </span>
 
         <div className="ml-auto flex items-center gap-2">
           <PresenceBar
@@ -611,42 +619,25 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             type="button"
             onClick={() => setMembersOpen((open) => !open)}
             className={clsx(
-              "flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition",
+              "flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition",
               membersOpen
                 ? "border-teal-300/30 bg-teal-300/10 text-teal-100"
                 : "border-white/10 text-slate-300 hover:border-white/20 hover:bg-white/5",
             )}
             aria-expanded={membersOpen}
           >
-            <Users className="h-3.5 w-3.5" />
-            <span className="hidden lg:inline">Members</span>
-            <span className="font-mono text-[10px] text-slate-500">
-              {currentMembers.length || state.users.length}
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            <span className="hidden lg:inline">
+              {displayedMembers.length || state.users.length} collaborators
             </span>
+            <span className="lg:hidden">{displayedMembers.length || state.users.length}</span>
+            {roomLocked && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-rose-300/10 px-1.5 py-0.5 text-[10px] text-rose-200">
+                <Lock className="h-2.5 w-2.5" />
+                Locked
+              </span>
+            )}
           </button>
-
-          {isOwner && (
-            <button
-              type="button"
-              onClick={() => void toggleRoomLock()}
-              disabled={lockUpdating}
-              className={clsx(
-                "hidden items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition md:flex disabled:opacity-60",
-                roomLocked
-                  ? "border-emerald-300/25 text-emerald-200 hover:bg-emerald-300/10"
-                  : "border-rose-300/25 text-rose-200 hover:bg-rose-300/10",
-              )}
-            >
-              {lockUpdating ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : roomLocked ? (
-                <Unlock className="h-3.5 w-3.5" />
-              ) : (
-                <Lock className="h-3.5 w-3.5" />
-              )}
-              {roomLocked ? "Unlock Room" : "Lock Room"}
-            </button>
-          )}
 
           <div className="hidden h-5 w-px bg-white/10 md:block" />
 
@@ -760,7 +751,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             </button>
             <button
               onClick={() => void copyValue(inviteLink, "link")}
-              className="flex items-center gap-1.5 rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-teal-400"
+              className="flex items-center gap-1.5 rounded-lg border border-teal-300/30 bg-teal-300/10 px-3 py-1.5 text-xs font-semibold text-teal-100 transition hover:bg-teal-300/15"
             >
               {copiedLink ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
               <span className="hidden lg:inline">{copiedLink ? "Copied" : "Share"}</span>
@@ -778,189 +769,167 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       </header>
 
       {membersOpen && (
-        <section className="shrink-0 border-b border-white/[0.06] bg-[#0c1018] px-4 py-3 shadow-lg shadow-black/20">
-          <div className="mx-auto flex max-w-6xl flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                <Users className="h-3.5 w-3.5" />
+        <div className="absolute right-4 top-14 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-white/10 bg-[#10141f] shadow-2xl shadow-black/50">
+          <div className="border-b border-white/[0.06] px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                <Users className="h-4 w-4 text-teal-200" />
                 Members
               </div>
-              <p className="mt-1 text-xs text-slate-500">
-                {roomLocked
-                  ? "Room locked — existing members can keep collaborating."
-                  : "Room open — people with the code can request to join."}
-              </p>
-            </div>
-            {isOwner && (
-              <button
-                type="button"
-                onClick={() => void toggleRoomLock()}
-                disabled={lockUpdating}
-                className={clsx(
-                  "inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition disabled:opacity-60 md:hidden",
-                  roomLocked
-                    ? "border-emerald-300/25 text-emerald-200 hover:bg-emerald-300/10"
-                    : "border-rose-300/25 text-rose-200 hover:bg-rose-300/10",
-                )}
-              >
-                {lockUpdating ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : roomLocked ? (
-                  <Unlock className="h-3.5 w-3.5" />
-                ) : (
-                  <Lock className="h-3.5 w-3.5" />
-                )}
-                {roomLocked ? "Unlock Room" : "Lock Room"}
-              </button>
-            )}
-            <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2 lg:max-w-2xl">
-              {displayedMembers.map((member) => {
-                const isSelfMember = member.user.id === selfUserId;
-                const canKick = isOwner && member.role !== "owner" && !isSelfMember;
-                return (
-                  <div
-                    key={member.user.id}
-                    className="relative flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2"
-                  >
-                    <span
-                      className={clsx(
-                        "h-2.5 w-2.5 shrink-0 rounded-full",
-                        member.online ? "bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.55)]" : "bg-slate-600",
-                      )}
-                    />
-                    <div
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
-                      style={{
-                        backgroundColor: `${member.user.color}24`,
-                        color: member.user.color,
-                        boxShadow: `0 0 0 1px ${member.user.color}66`,
-                      }}
-                    >
-                      {member.user.name.slice(0, 2).toUpperCase()}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span className="truncate text-sm font-semibold text-slate-100">
-                          {member.user.name}
-                        </span>
-                        {isSelfMember && (
-                          <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
-                            you
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-0.5 flex items-center gap-2 text-[11px] text-slate-500">
-                        <span>{member.online ? "Online" : "Away"}</span>
-                        {member.role === "owner" && (
-                          <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/25 bg-amber-300/10 px-1.5 py-0.5 font-semibold text-amber-200">
-                            <Crown className="h-2.5 w-2.5" />
-                            Owner
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    {canKick && (
-                      <div className="relative">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setMemberMenuUserId((open) => open === member.user.id ? null : member.user.id)
-                          }
-                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-100"
-                          aria-label={`Manage ${member.user.name}`}
-                        >
-                          <MoreVertical className="h-3.5 w-3.5" />
-                        </button>
-                        {memberMenuUserId === member.user.id && (
-                          <div className="absolute right-0 top-full z-50 mt-1 w-32 rounded-lg border border-white/10 bg-[#111722] p-1 shadow-2xl shadow-black/40">
-                            <button
-                              type="button"
-                              onClick={() => void kickMember(member)}
-                              disabled={kickingUserId === member.user.id}
-                              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold text-rose-200 hover:bg-rose-400/10 disabled:opacity-60"
-                            >
-                              {kickingUserId === member.user.id ? (
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              ) : (
-                                <UserMinus className="h-3.5 w-3.5" />
-                              )}
-                              Kick
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+              <span className="text-[11px] font-medium text-slate-500">
+                {displayedMembers.length || state.users.length} collaborators
+              </span>
             </div>
           </div>
-        </section>
+
+          <div className="max-h-72 overflow-y-auto p-2">
+            {displayedMembers.map((member) => {
+              const isSelfMember = member.user.id === selfUserId;
+              const canKick = isOwner && member.role !== "owner" && !isSelfMember;
+              return (
+                <div
+                  key={member.user.id}
+                  className="relative flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-white/[0.04]"
+                >
+                  <span
+                    className={clsx(
+                      "h-2 w-2 shrink-0 rounded-full",
+                      member.online ? "bg-emerald-400" : "bg-slate-600",
+                    )}
+                  />
+                  <div
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
+                    style={{
+                      backgroundColor: `${member.user.color}24`,
+                      color: member.user.color,
+                      boxShadow: `0 0 0 1px ${member.user.color}66`,
+                    }}
+                  >
+                    {member.user.name.slice(0, 2).toUpperCase()}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-sm font-medium text-slate-100">
+                        {member.user.name}
+                      </span>
+                      {isSelfMember && (
+                        <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
+                          you
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-2 text-[11px] text-slate-500">
+                      <span>{member.online ? "Online" : "Away"}</span>
+                      {member.role === "owner" && (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/25 bg-amber-300/10 px-1.5 py-0.5 font-semibold text-amber-200">
+                          <Crown className="h-2.5 w-2.5" />
+                          Owner
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {canKick && (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setMemberMenuUserId((open) => open === member.user.id ? null : member.user.id)
+                        }
+                        className="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-100"
+                        aria-label={`Manage ${member.user.name}`}
+                      >
+                        <MoreVertical className="h-3.5 w-3.5" />
+                      </button>
+                      {memberMenuUserId === member.user.id && (
+                        <div className="absolute right-0 top-full z-50 mt-1 w-32 rounded-lg border border-white/10 bg-[#111722] p-1 shadow-2xl shadow-black/40">
+                          <button
+                            type="button"
+                            onClick={() => void kickMember(member)}
+                            disabled={kickingUserId === member.user.id}
+                            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold text-rose-200 hover:bg-rose-400/10 disabled:opacity-60"
+                          >
+                            {kickingUserId === member.user.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <UserMinus className="h-3.5 w-3.5" />
+                            )}
+                            Kick
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="border-t border-white/[0.06] p-3">
+            <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">Room</div>
+            <div className="flex items-center justify-between gap-3 rounded-xl bg-white/[0.03] px-3 py-2">
+              <span className="inline-flex items-center gap-2 text-xs font-medium text-slate-300">
+                {roomLocked ? <Lock className="h-3.5 w-3.5 text-rose-300" /> : <Unlock className="h-3.5 w-3.5 text-emerald-300" />}
+                {roomLocked ? "Locked" : "Open to joins"}
+              </span>
+              {isOwner && (
+                <button
+                  type="button"
+                  onClick={() => void toggleRoomLock()}
+                  disabled={lockUpdating}
+                  className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-slate-100 disabled:opacity-60"
+                >
+                  {lockUpdating ? "Updating…" : roomLocked ? "Unlock room" : "Lock room"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       <nav className="shrink-0 border-b border-white/[0.06] bg-[#0a0d13] px-3 py-2">
-        <div className="flex items-center gap-2 overflow-x-auto">
-          <span className="shrink-0 px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
-            Layout
-          </span>
-          {[
-            { id: "edit", icon: Code2, label: "Editor", disabled: false },
-            { id: "split", icon: Columns2, label: "Split", disabled: !hasCompanionPane },
-            { id: "preview", icon: Eye, label: "Preview", disabled: !hasCompanionPane },
-          ].map(({ id, icon: Icon, label, disabled }) => (
-            <button
-              key={id}
-              type="button"
-              disabled={disabled}
-              onClick={() => setManualViewMode(id as ViewMode)}
-              className={clsx(
-                "flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-45",
-                viewMode === id
-                  ? "border-teal-300/30 bg-teal-300/15 text-teal-100 shadow-[0_0_18px_rgba(45,212,191,0.08)]"
-                  : "border-white/10 bg-white/[0.02] text-slate-400 hover:border-white/20 hover:text-slate-100",
-              )}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              {label}
-            </button>
-          ))}
-
-          <div className="mx-1 h-5 w-px shrink-0 bg-white/10" />
-          <span className="shrink-0 px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
-            Panels
-          </span>
-          {[
-            { id: "output", icon: TerminalIcon, label: "Output" },
-            { id: "problems", icon: Bug, label: "Problems" },
-            { id: "input", icon: TerminalIcon, label: "Input" },
-          ].map(({ id, icon: Icon, label }) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => openPanelSurface(id as BottomTab)}
-              className={clsx(
-                "flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition",
-                bottomTab === id
-                  ? "border-cyan-300/30 bg-cyan-300/10 text-cyan-100"
-                  : "border-white/10 bg-white/[0.02] text-slate-400 hover:border-white/20 hover:text-slate-100",
-              )}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              {label}
-              {id === "problems" && problemsCount > 0 && (
-                <span className={clsx(
-                  "rounded px-1.5 text-[10px]",
-                  errorsCount > 0 ? "bg-rose-400/20 text-rose-200" : "bg-white/10 text-slate-300",
-                )}>
-                  {problemsCount}
-                </span>
-              )}
-            </button>
-          ))}
-          <span className="ml-auto hidden shrink-0 items-center gap-1.5 rounded-full border border-white/10 px-2 py-1 text-[10px] font-semibold text-slate-500 sm:flex">
-            {roomLocked ? <Lock className="h-3 w-3 text-rose-300" /> : <Unlock className="h-3 w-3 text-emerald-300" />}
-            {roomLocked ? "Room locked" : "Room open"}
-          </span>
+        <div className="flex overflow-x-auto">
+          <div className="inline-flex rounded-xl border border-white/10 bg-[#11151f] p-0.5">
+            {[
+              { id: "edit", label: "Editor", disabled: false, kind: "view" },
+              { id: "split", label: "Split", disabled: !hasCompanionPane, kind: "view" },
+              { id: "preview", label: "Preview", disabled: !hasPreview, kind: "view" },
+              { id: "output", label: "Output", disabled: false, kind: "panel" },
+              { id: "problems", label: "Problems", disabled: false, kind: "panel" },
+              { id: "input", label: "Input", disabled: false, kind: "panel" },
+            ].map(({ id, label, disabled, kind }) => {
+              const active =
+                kind === "view"
+                  ? viewMode === id
+                  : bottomTab === id && panelSurfaceVisible;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => {
+                    if (kind === "view") setManualViewMode(id as ViewMode);
+                    else openPanelSurface(id as BottomTab);
+                  }}
+                  className={clsx(
+                    "min-w-0 shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 sm:px-3",
+                    active
+                      ? "bg-teal-300/15 text-teal-100 shadow-[0_0_16px_rgba(45,212,191,0.08)]"
+                      : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-200",
+                  )}
+                >
+                  <span>{label}</span>
+                  {id === "problems" && problemsCount > 0 && (
+                    <span className={clsx(
+                      "ml-1.5 rounded px-1 text-[10px]",
+                      errorsCount > 0 ? "bg-rose-400/20 text-rose-200" : "bg-white/10 text-slate-300",
+                    )}>
+                      {problemsCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </nav>
 
@@ -1084,33 +1053,20 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         {/* Bottom panels */}
         {bottomOpen && (
           <div className="flex h-64 shrink-0 flex-col border-t border-white/[0.06] bg-[#0a0d13]">
-            <div className="flex items-center gap-1 border-b border-white/[0.06] px-2">
+            <div className="flex items-center gap-2 border-b border-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-400">
+              <TerminalIcon className="h-3.5 w-3.5 text-cyan-200" />
+              <span>{bottomTab === "output" ? "Output" : bottomTab === "problems" ? "Problems" : "Input"}</span>
+              {bottomTab === "problems" && problemsCount > 0 && (
+                <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-slate-300">
+                  {problemsCount}
+                </span>
+              )}
               <button
-                onClick={() => setBottomTab("output")}
-                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "output" ? "border-b-2 border-teal-400 text-teal-200" : "text-slate-500 hover:text-slate-300")}
+                onClick={() => setBottomOpen(false)}
+                className="ml-auto rounded px-2 py-1 text-slate-500 hover:bg-white/10 hover:text-slate-300"
               >
-                <TerminalIcon className="h-3.5 w-3.5" />
-                Output
+                Close
               </button>
-              <button
-                onClick={() => setBottomTab("problems")}
-                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "problems" ? "border-b-2 border-teal-400 text-teal-200" : "text-slate-500 hover:text-slate-300")}
-              >
-                <Bug className="h-3.5 w-3.5" />
-                Problems {problemsCount > 0 && <span className={clsx("rounded px-1.5 text-[10px]", errorsCount > 0 ? "bg-rose-400/20 text-rose-300" : "bg-white/10 text-slate-400")}>{problemsCount}</span>}
-              </button>
-              <button
-                onClick={() => setBottomTab("input")}
-                className={clsx("flex items-center gap-1.5 px-3 py-2 text-xs font-medium", bottomTab === "input" ? "border-b-2 border-teal-400 text-teal-200" : "text-slate-500 hover:text-slate-300")}
-              >
-                <TerminalIcon className="h-3.5 w-3.5" />
-                Input
-              </button>
-              <div className="ml-auto flex items-center gap-1">
-                <button onClick={() => setBottomOpen(false)} className="rounded p-1 text-slate-500 hover:bg-white/10 hover:text-slate-300">
-                  <span className="text-xs">Close</span>
-                </button>
-              </div>
             </div>
             <div className="min-h-0 flex-1">
               {renderResultPanel()}
@@ -1133,6 +1089,12 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           <Database className="h-3 w-3" />
           cache: {state.cacheMode === "redis" ? "Redis" : state.cacheMode === "memory" ? "in-memory" : "—"}
         </span>
+        {typingStatus && (
+          <span className="hidden items-center gap-1.5 rounded-full border border-teal-300/15 bg-teal-300/10 px-2 py-0.5 font-medium text-teal-100 md:flex">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-300" />
+            {typingStatus}
+          </span>
+        )}
         {!bottomOpen && (
           <button onClick={() => setBottomOpen(true)} className="flex items-center gap-1 rounded bg-white/10 px-2 py-0.5 text-slate-400 hover:bg-white/20 hover:text-slate-200">
             <TerminalIcon className="h-3 w-3" />

@@ -330,9 +330,9 @@ export default function MonacoEditor({
     for (const peer of peers) {
       const id = cssSafe(peer.sessionId);
       const color = peer.user.color;
-      const name = peer.user.name.slice(0, 24);
 
-      // Caret beam + name flag.
+      // Caret beam only. Usernames intentionally stay out of Monaco so
+      // cursor labels can never mismatch collaborator identity.
       const clamped = Math.min(peer.cursor!.offset, maxOffset);
       const at = model.getPositionAt(clamped);
       decorations.push({
@@ -344,7 +344,6 @@ export default function MonacoEditor({
         },
         options: {
           beforeContentClassName: `tandem-caret tandem-caret--${id}`,
-          hoverMessage: { value: `${name} is here` },
           stickiness: 1, // NeverGrowsWhenTypingAtEdges
         },
       });
@@ -373,7 +372,6 @@ export default function MonacoEditor({
 
       css.push(
         `.tandem-caret--${id}{border-left:2px solid ${color};margin-left:-1px;height:100%;box-sizing:border-box;position:relative;pointer-events:none;}`,
-        `.tandem-caret--${id}::before{content:${JSON.stringify(name)};position:absolute;top:-1.5em;left:-2px;background:${color};color:#0b0e14;font-family:var(--font-jetbrains),ui-monospace,monospace;font-size:10px;font-weight:700;line-height:1.5;padding:0 6px;border-radius:4px 4px 4px 1px;white-space:nowrap;box-shadow:0 2px 10px #0008;z-index:30;}`,
       );
     }
 
