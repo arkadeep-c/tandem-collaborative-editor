@@ -236,7 +236,6 @@ class Room {
         const logged: LoggedOp = { revision: this.revision, op };
         this.opLog.push(logged);
         applied.push(op);
-        missed.push(logged);
       }
       while (this.opLog.length > OP_LOG_LIMIT) this.opLog.shift();
 
