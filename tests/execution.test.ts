@@ -8,6 +8,8 @@ import {
   createDockerWorkspaceMount,
   executeCode,
   getExecutionAvailability,
+  startInteractiveExecution,
+  type InteractiveExecutionHandle,
   getHostExecutionPath,
   JAVAC_VM_ARGS,
   JAVA_COMPILE_TIMEOUT_MS,
@@ -23,7 +25,17 @@ import {
   parsePythonErrors,
   statusFromCompileLifecycle,
 } from "@/lib/execution/executor";
-import { EXECUTABLE_LANGUAGES, isExecutionLanguage, LANGUAGE_CONFIG, type ExecutionLanguage } from "@/lib/execution/types";
+import {
+  EXECUTABLE_LANGUAGES,
+  isExecutionLanguage,
+  LANGUAGE_CONFIG,
+  type ExecutionLanguage,
+  type ExecutionStreamEvent,
+} from "@/lib/execution/types";
+import {
+  startExecutionSession,
+  writeExecutionStdin,
+} from "@/lib/execution/interactiveSessions";
 import { LANGUAGE_OPTIONS } from "@/lib/types";
 
 let cachedJavaAvailability: Promise<{ ready: boolean; reason?: string }> | null = null;
@@ -39,6 +51,39 @@ async function dockerExecutionReady(): Promise<boolean> {
 async function runDockerWhenReady(language: ExecutionLanguage, code: string, stdin?: string) {
   if (!(await dockerExecutionReady())) return { skipped: true as const };
   return { skipped: false as const, result: await executeCode(language, code, stdin) };
+}
+
+async function waitForInteractiveEvent(
+  events: ExecutionStreamEvent[],
+  predicate: (event: ExecutionStreamEvent) => boolean,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (events.some(predicate)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for interactive execution event");
+}
+
+async function runInteractiveDockerWhenReady(
+  language: ExecutionLanguage,
+  code: string,
+  drive?: (
+    handle: InteractiveExecutionHandle,
+    events: ExecutionStreamEvent[],
+  ) => Promise<void> | void,
+) {
+  if (!(await dockerExecutionReady())) return { skipped: true as const };
+
+  const events: ExecutionStreamEvent[] = [];
+  const handle = startInteractiveExecution(language, code, {
+    onEvent: (event) => events.push(event),
+  });
+
+  await drive?.(handle, events);
+  const result = await handle.result;
+  return { skipped: false as const, result, events };
 }
 
 async function javaAvailability(): Promise<{ ready: boolean; reason?: string }> {
@@ -119,7 +164,15 @@ describe("Docker execution readiness", () => {
     expect(dockerStdinIndex).toBeLessThan(imageIndex);
     expect(args).not.toContain("-t");
     expect(args[imageIndex + 1]).toBe("-i"); // /usr/bin/env -i still clears the container env.
-    expect(args).toEqual(expect.arrayContaining(["--memory", String(768 * 1024 * 1024), "--pids-limit", "96"]));
+    expect(args).toEqual(expect.arrayContaining([
+      "--network", "none",
+      "--cpus", "0.5",
+      "--memory", String(768 * 1024 * 1024),
+      "--pids-limit", "96",
+      "--read-only",
+      "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+      "--user", "65534:65534",
+    ]));
     expect(script).toContain("ulimit -t 11");
     expect(script).toContain("ulimit -f 4096");
     expect(script).toContain("ulimit -u 96");
@@ -380,6 +433,195 @@ public class Main {
     expect(execution.result.status).toBe("timeout");
     expect(execution.result.timedOut).toBe(true);
   }, 25_000);
+});
+
+describe("interactive execution sessions", () => {
+  it("runs a program that reads one integer from stdin", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "python",
+      `value = int(input())
+print(value * 2)
+`,
+      async (handle) => {
+        handle.writeStdin("21\n");
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout.trim()).toBe("42");
+    expect(execution.events.some((event) => event.type === "stdout" && event.chunk.includes("42"))).toBe(true);
+  }, 20_000);
+
+  it("runs a program that reads multiple values sequentially", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "python",
+      `first = int(input())
+second = int(input())
+third = int(input())
+print(first + second + third)
+`,
+      async (handle) => {
+        handle.writeStdin("10\n");
+        handle.writeStdin("20\n");
+        handle.writeStdin("5\n");
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout.trim()).toBe("35");
+  }, 20_000);
+
+  it("streams a prompt before accepting stdin", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "python",
+      `print("Enter number:", end="", flush=True)
+value = input()
+print(" got " + value)
+`,
+      async (handle, events) => {
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("Enter number:"),
+        );
+        handle.writeStdin("7\n");
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout).toContain("Enter number:");
+    expect(execution.result.stdout).toContain("got 7");
+  }, 20_000);
+
+  it("runs programs that exit without stdin", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "python",
+      "print('no input needed')\n",
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout.trim()).toBe("no input needed");
+  }, 20_000);
+
+  it("times out programs that exceed the existing timeout", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "python",
+      "import time\ntime.sleep(20)\n",
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("timeout");
+    expect(execution.result.timedOut).toBe(true);
+  }, 25_000);
+
+  it("stops programs that exceed the existing output limit", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "python",
+      "import sys\nsys.stdout.write('x' * (1024 * 1024 + 4096))\nsys.stdout.flush()\n",
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("output_limit");
+    expect(execution.result.outputTruncated).toBe(true);
+    expect(execution.result.stdout).toContain("[Output truncated: exceeded 1MB limit]");
+  }, 25_000);
+
+  it("cancels a running interactive execution", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "python",
+      "import time\nprint('ready', flush=True)\nwhile True:\n    time.sleep(0.1)\n",
+      async (handle, events) => {
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("ready"),
+        );
+        handle.stop();
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("cancelled");
+    expect(execution.result.stderr).toBe("Execution stopped by user.");
+  }, 20_000);
+
+  it("does not route stdin to another user or room execution", async () => {
+    const session = startExecutionSession({
+      roomCode: "ROOMA1",
+      userId: "user-a",
+      sessionId: "session-a",
+      language: "python",
+      code: "value = input()\nprint(value)\n",
+    });
+
+    if ("error" in session) {
+      throw new Error(session.error);
+    }
+
+    try {
+      expect(
+        writeExecutionStdin(
+          session.id,
+          { roomCode: "ROOMA1", userId: "user-b", sessionId: "session-a" },
+          "wrong-user\n",
+        ),
+      ).toBe(false);
+      expect(
+        writeExecutionStdin(
+          session.id,
+          { roomCode: "ROOMB2", userId: "user-a", sessionId: "session-a" },
+          "wrong-room\n",
+        ),
+      ).toBe(false);
+      expect(
+        writeExecutionStdin(
+          session.id,
+          { roomCode: "ROOMA1", userId: "user-a", sessionId: "session-b" },
+          "wrong-session\n",
+        ),
+      ).toBe(false);
+      expect(
+        writeExecutionStdin(
+          session.id,
+          { roomCode: "ROOMA1", userId: "user-a", sessionId: "session-a" },
+          "right-owner\n",
+        ),
+      ).toBe(true);
+    } finally {
+      session.stop();
+      await session.done.catch(() => undefined);
+    }
+  });
 });
 
 describe("Docker-backed execution integration", () => {

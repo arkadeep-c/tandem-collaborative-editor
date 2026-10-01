@@ -51,6 +51,22 @@ export interface ExecutionRequest {
   roomCode?: string;
 }
 
+export type ExecutionStreamStatus =
+  | "starting"
+  | "compiling"
+  | "running"
+  | "waiting"
+  | "finished";
+
+export type ExecutionStreamEvent =
+  | { type: "start"; executionId: string }
+  | { type: "status"; status: ExecutionStreamStatus; message?: string }
+  | { type: "stdout"; chunk: string }
+  | { type: "stderr"; chunk: string }
+  | { type: "stdin"; chunk: string }
+  | { type: "result"; result: ExecutionResult }
+  | { type: "error"; message: string };
+
 export interface ExecutionLanguageAvailability {
   ready: boolean;
   reason?: string;

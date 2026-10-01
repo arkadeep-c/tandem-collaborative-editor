@@ -47,10 +47,17 @@ import {
   type RoomRole,
 } from "@/lib/types";
 import { apiFetch, ensureClientSession } from "@/lib/apiFetch";
-import { isExecutionLanguage, type ExecutionAvailability, type ExecutionProblem, type ExecutionResult } from "@/lib/execution/types";
+import {
+  isExecutionLanguage,
+  type ExecutionAvailability,
+  type ExecutionProblem,
+  type ExecutionResult,
+  type ExecutionStreamEvent,
+  type ExecutionStreamStatus,
+} from "@/lib/execution/types";
 
 type ViewMode = "edit" | "split" | "preview";
-type BottomTab = "output" | "problems" | "input";
+type BottomTab = "output" | "problems";
 type EditorConfirmation =
   | { type: "leave" }
   | { type: "kick"; member: RoomMemberInfo }
@@ -83,7 +90,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
   const [executionAvailability, setExecutionAvailability] = useState<ExecutionAvailability | null>(null);
   const [running, setRunning] = useState(false);
-  const [stdin, setStdin] = useState("");
+  const [executionEvents, setExecutionEvents] = useState<ExecutionStreamEvent[]>([]);
+  const [executionStreamStatus, setExecutionStreamStatus] = useState<ExecutionStreamStatus | undefined>();
   const [bottomTab, setBottomTab] = useState<BottomTab>("output");
   const [bottomOpen, setBottomOpen] = useState(false);
   const [fontSize, setFontSize] = useState(14);
@@ -93,6 +101,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const executionAbortRef = useRef<AbortController | null>(null);
+  const executionIdRef = useRef<string | null>(null);
+  const stdinQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const { state, setBridge, submitLocalOps, publishPresence, updateMeta } =
     useCollaborativeDocument(room.code);
@@ -235,10 +245,25 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const stopExecution = useCallback(() => {
     const controller = executionAbortRef.current;
     if (!controller || controller.signal.aborted) return;
+
+    const activeExecutionId = executionIdRef.current;
+    if (activeExecutionId) {
+      void apiFetch(
+        `/api/rooms/${encodeURIComponent(room.code)}/execute/${encodeURIComponent(activeExecutionId)}/stop`,
+        { method: "POST" },
+      ).catch(() => undefined);
+    }
+
     controller.abort();
+    stdinQueueRef.current = Promise.resolve();
     setRunning(false);
     setProblemMarkers([]);
+    setExecutionStreamStatus("finished");
     openPanelSurface("output");
+    setExecutionEvents((events) => [
+      ...events,
+      { type: "status", status: "finished", message: "Execution stopped by user." },
+    ]);
     setExecutionResult({
       status: "cancelled",
       stdout: "",
@@ -247,12 +272,90 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       duration: 0,
       problems: [],
     });
-  }, [openPanelSurface, setProblemMarkers]);
+  }, [openPanelSurface, room.code, setProblemMarkers]);
+
+  const appendExecutionEvent = useCallback((event: ExecutionStreamEvent) => {
+    if (event.type === "status") {
+      setExecutionStreamStatus(event.status);
+    }
+    if (event.type === "start") {
+      executionIdRef.current = event.executionId;
+      return;
+    }
+    if (event.type === "result") {
+      setExecutionResult(event.result);
+      if (event.result.problems && event.result.problems.length > 0) {
+        setBottomTab("problems");
+        setProblemMarkers(event.result.problems);
+      } else {
+        setProblemMarkers([]);
+      }
+      return;
+    }
+    if (event.type === "error") {
+      setExecutionResult({
+        status: "execution_error",
+        stdout: "",
+        stderr: event.message,
+        exitCode: null,
+        duration: 0,
+        problems: [],
+      });
+      setProblemMarkers([]);
+    }
+    setExecutionEvents((events) => [...events, event]);
+  }, [setProblemMarkers]);
+
+  const sendExecutionInput = useCallback(async (input: string) => {
+    const activeExecutionId = executionIdRef.current;
+    if (!running) return;
+
+    if (!activeExecutionId) {
+      setExecutionEvents((events) => [
+        ...events,
+        { type: "error", message: "Execution is still starting. Try again in a moment." },
+      ]);
+      return;
+    }
+
+    setExecutionEvents((events) => [...events, { type: "stdin", chunk: input }]);
+
+    const send = async () => {
+      try {
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(room.code)}/execute/${encodeURIComponent(activeExecutionId)}/stdin`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ input }),
+          },
+        );
+
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          setExecutionEvents((events) => [
+            ...events,
+            { type: "error", message: data.error ?? "Could not send input to the running program." },
+          ]);
+        }
+      } catch (err) {
+        setExecutionEvents((events) => [
+          ...events,
+          { type: "error", message: err instanceof Error ? err.message : "Could not send input to the running program." },
+        ]);
+      }
+    };
+
+    stdinQueueRef.current = stdinQueueRef.current.then(send, send);
+    await stdinQueueRef.current;
+  }, [room.code, running]);
 
   const runCode = useCallback(async () => {
     if (running) return;
     if (isExecutable && currentExecutionAvailability?.ready === false) {
       openPanelSurface("output");
+      setExecutionEvents([]);
+      setExecutionStreamStatus("finished");
       setExecutionResult({
         status: "unavailable",
         stdout: "",
@@ -270,49 +373,35 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
     const controller = new AbortController();
     executionAbortRef.current = controller;
+    executionIdRef.current = null;
+    stdinQueueRef.current = Promise.resolve();
     setRunning(true);
+    setExecutionStreamStatus("starting");
     openPanelSurface("output");
     setExecutionResult(null);
+    setExecutionEvents([]);
 
     try {
       await ensureClientSession();
       const res = await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/execute`, {
         method: "POST",
         signal: controller.signal,
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Accept": "application/x-ndjson",
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           language: state.language,
           code,
-          stdin: stdin || undefined,
         }),
       });
 
-      const result = (await res.json()) as ExecutionResult & { error?: string };
-      
-      if (!res.ok && result.error) {
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
         setExecutionResult({
           status: "execution_error",
           stdout: "",
-          stderr: result.error,
-          exitCode: null,
-          duration: 0,
-          problems: [],
-        });
-      } else {
-        setExecutionResult(result);
-        if (result.problems && result.problems.length > 0) {
-          setBottomTab("problems");
-          setProblemMarkers(result.problems);
-        } else {
-          setProblemMarkers([]);
-        }
-      }
-    } catch (err) {
-      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
-        setExecutionResult({
-          status: "cancelled",
-          stdout: "",
-          stderr: "Execution stopped by user.",
+          stderr: data.error ?? "Failed to execute",
           exitCode: null,
           duration: 0,
           problems: [],
@@ -320,10 +409,45 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         setProblemMarkers([]);
         return;
       }
+
+      if (!res.body) {
+        throw new Error("Execution stream unavailable.");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as ExecutionStreamEvent;
+          appendExecutionEvent(event);
+        }
+      }
+
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        const event = JSON.parse(buffer) as ExecutionStreamEvent;
+        appendExecutionEvent(event);
+      }
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        setProblemMarkers([]);
+        return;
+      }
+      const message = err instanceof Error ? err.message : "Failed to execute";
+      setExecutionEvents((events) => [...events, { type: "error", message }]);
       setExecutionResult({
         status: "execution_error",
         stdout: "",
-        stderr: err instanceof Error ? err.message : "Failed to execute",
+        stderr: message,
         exitCode: null,
         duration: 0,
         problems: [],
@@ -332,9 +456,11 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       if (executionAbortRef.current === controller) {
         executionAbortRef.current = null;
       }
+      executionIdRef.current = null;
+      setExecutionStreamStatus("finished");
       setRunning(false);
     }
-  }, [currentExecutionAvailability, executionUnavailableMessage, getCurrentContent, isExecutable, openPanelSurface, running, room.code, setProblemMarkers, state.language, stdin]);
+  }, [appendExecutionEvent, currentExecutionAvailability, executionUnavailableMessage, getCurrentContent, isExecutable, openPanelSurface, running, room.code, setProblemMarkers, state.language]);
 
   useEffect(() => () => {
     executionAbortRef.current?.abort();
@@ -582,29 +708,12 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const panelSurfaceVisible =
     bottomOpen || (hasResultPane && viewMode !== "edit");
 
-  const renderInputPanel = () => (
-    <div className="flex h-full flex-col p-3">
-      <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-        Stdin (input for program)
-      </div>
-      <textarea
-        value={stdin}
-        onChange={(event) => setStdin(event.target.value)}
-        placeholder="Enter input for your program, e.g.&#10;5&#10;10&#10;20"
-        className="flex-1 resize-none rounded border border-white/10 bg-[#0b0e14] p-3 font-mono text-xs text-slate-200 outline-none focus:border-teal-400/50"
-      />
-      <div className="mt-2 text-[10px] text-slate-600">
-        Max 10KB, will be fed to program&apos;s stdin
-      </div>
-    </div>
-  );
-
   const renderResultPanel = (withHeader = false) => (
     <div className="flex h-full min-h-0 flex-col bg-[#0a0d13]">
       {withHeader && (
         <div className="flex h-10 shrink-0 items-center gap-2 border-b border-white/[0.06] px-3 text-xs font-semibold text-slate-400">
           <TerminalIcon className="h-3.5 w-3.5 text-cyan-200" />
-          <span>{bottomTab === "output" ? "Output" : bottomTab === "problems" ? "Problems" : "Input"}</span>
+          <span>{bottomTab === "output" ? "Output" : "Problems"}</span>
           {bottomTab === "problems" && problemsCount > 0 && (
             <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-slate-300">
               {problemsCount}
@@ -617,14 +726,20 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           <OutputPanel
             result={executionResult}
             running={running}
-            onClear={() => setExecutionResult(null)}
+            streamEvents={executionEvents}
+            streamStatus={executionStreamStatus}
+            onClear={() => {
+              setExecutionResult(null);
+              setExecutionEvents([]);
+              setProblemMarkers([]);
+            }}
             onStop={stopExecution}
+            onSendInput={sendExecutionInput}
           />
         )}
         {bottomTab === "problems" && (
           <ProblemsPanel problems={executionResult?.problems || []} onJumpTo={jumpToError} />
         )}
-        {bottomTab === "input" && renderInputPanel()}
       </div>
     </div>
   );
@@ -982,7 +1097,6 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               { id: "preview", label: "Preview", disabled: !hasPreview, kind: "view" },
               { id: "output", label: "Output", disabled: false, kind: "panel" },
               { id: "problems", label: "Problems", disabled: false, kind: "panel" },
-              { id: "input", label: "Input", disabled: false, kind: "panel" },
             ].map(({ id, label, disabled, kind }) => {
               const active =
                 kind === "view"
@@ -1142,7 +1256,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           <div className="flex h-64 shrink-0 flex-col border-t border-white/[0.06] bg-[#0a0d13]">
             <div className="flex items-center gap-2 border-b border-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-400">
               <TerminalIcon className="h-3.5 w-3.5 text-cyan-200" />
-              <span>{bottomTab === "output" ? "Output" : bottomTab === "problems" ? "Problems" : "Input"}</span>
+              <span>{bottomTab === "output" ? "Output" : "Problems"}</span>
               {bottomTab === "problems" && problemsCount > 0 && (
                 <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-slate-300">
                   {problemsCount}
