@@ -3,6 +3,7 @@ import { roomEngine } from "@/lib/collab/rooms";
 import { metaUpdateLimiter } from "@/lib/rateLimit";
 import { listRoomMembers, requireRoomAccess } from "@/lib/roomAccess";
 import { getAuthenticatedSessionFromRequest, type SessionUser } from "@/lib/session";
+import { normalizeRoomTemplateMode } from "@/lib/roomTemplates";
 import { cleanTitle, isLanguageId } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +32,7 @@ export async function GET(request: NextRequest, ctx: RouteContext) {
       title: access.document.title,
       language: access.document.language,
       locked: Boolean(access.room.locked),
+      templateMode: normalizeRoomTemplateMode(access.room.templateMode),
       role: access.member.role === "owner" ? "owner" : "editor",
       activeUsers: roomEngine.getActiveCount(access.code),
       updatedAt: access.room.updatedAt.toISOString(),

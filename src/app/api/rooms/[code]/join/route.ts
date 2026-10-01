@@ -6,6 +6,7 @@ import { roomEngine } from "@/lib/collab/rooms";
 import { roomJoinLimiter } from "@/lib/rateLimit";
 import { isValidRoomCode, normalizeRoomCode } from "@/lib/roomCode";
 import { findRoomByCode, getMembership, listRoomMembers } from "@/lib/roomAccess";
+import { normalizeRoomTemplateMode } from "@/lib/roomTemplates";
 import {
   createSession,
   createBearerToken,
@@ -110,6 +111,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
       title: found.document.title,
       language: found.document.language,
       locked: Boolean(found.room.locked),
+      templateMode: normalizeRoomTemplateMode(found.room.templateMode),
       activeUsers: roomEngine.getActiveCount(code),
     },
     members,

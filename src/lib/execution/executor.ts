@@ -24,6 +24,126 @@ const FILE_SIZE_BLOCKS = 4096;
 const PROCESS_LIMIT = 96;
 const SAFE_PATH =
   "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const INTERACTIVE_TERMINAL_TOOLS = ["python3"] as const;
+
+export const INTERACTIVE_TERMINAL_WRAPPER = String.raw`
+import errno
+import os
+import select
+import subprocess
+import sys
+import termios
+
+if len(sys.argv) < 2:
+    print("interactive terminal wrapper missing command", file=sys.stderr)
+    raise SystemExit(127)
+
+master_fd, slave_fd = os.openpty()
+
+try:
+    attrs = termios.tcgetattr(slave_fd)
+    attrs[3] = attrs[3] & ~termios.ECHO
+    termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+except Exception:
+    pass
+
+child = subprocess.Popen(
+    sys.argv[1:],
+    stdin=slave_fd,
+    stdout=slave_fd,
+    stderr=subprocess.PIPE,
+    close_fds=True,
+    preexec_fn=os.setsid,
+)
+os.close(slave_fd)
+
+stdin_fd = sys.stdin.fileno()
+stdout_fd = sys.stdout.fileno()
+stderr_fd = sys.stderr.fileno()
+child_stderr_fd = child.stderr.fileno() if child.stderr else None
+read_fds = [master_fd, stdin_fd]
+if child_stderr_fd is not None:
+    read_fds.append(child_stderr_fd)
+
+def remove_fd(fd):
+    try:
+        read_fds.remove(fd)
+    except ValueError:
+        pass
+
+while read_fds:
+    try:
+        ready, _, _ = select.select(read_fds, [], [], 0.05)
+    except InterruptedError:
+        continue
+
+    saw_output = False
+
+    for fd in ready:
+        try:
+            data = os.read(fd, 4096)
+        except OSError as exc:
+            if exc.errno != errno.EIO:
+                raise
+            data = b""
+
+        if not data:
+            remove_fd(fd)
+            continue
+
+        if fd == stdin_fd:
+            try:
+                os.write(master_fd, data)
+            except OSError:
+                remove_fd(stdin_fd)
+        elif fd == master_fd:
+            os.write(stdout_fd, data)
+            saw_output = True
+        elif child_stderr_fd is not None and fd == child_stderr_fd:
+            os.write(stderr_fd, data)
+            saw_output = True
+
+    if child.poll() is not None:
+        if saw_output:
+            continue
+        if master_fd not in ready:
+            try:
+                data = os.read(master_fd, 4096)
+                if data:
+                    os.write(stdout_fd, data)
+                    continue
+            except OSError:
+                pass
+        if child_stderr_fd is not None:
+            try:
+                data = os.read(child_stderr_fd, 4096)
+                if data:
+                    os.write(stderr_fd, data)
+                    continue
+            except OSError:
+                pass
+        break
+
+try:
+    os.close(master_fd)
+except OSError:
+    pass
+
+code = child.wait()
+if code < 0:
+    raise SystemExit(128 + abs(code))
+raise SystemExit(code)
+`.trim();
+
+export function createInteractiveTerminalCommand(
+  command: string,
+  args: readonly string[],
+): { command: string; args: string[] } {
+  return {
+    command: "python3",
+    args: ["-c", INTERACTIVE_TERMINAL_WRAPPER, command, ...args],
+  };
+}
 
 export function getHostExecutionPath(
   hostPlatform: NodeJS.Platform = platform(),
@@ -656,6 +776,7 @@ class LinuxNamespaceBackend implements SandboxBackend {
     options: InteractiveSpawnOptions,
   ): InteractiveProcess {
     const repoRoot = process.cwd();
+    const terminalCommand = createInteractiveTerminalCommand(command, args);
 
     const script = [
       'cd "$TANDEM_WORKDIR" || exit 111',
@@ -694,8 +815,8 @@ class LinuxNamespaceBackend implements SandboxBackend {
       "-lc",
       script,
       "sandbox",
-      command,
-      ...args,
+      terminalCommand.command,
+      ...terminalCommand.args,
     ];
 
     return rawSpawnInteractive("unshare", unshareArgs, options);
@@ -808,13 +929,14 @@ class DockerBackend implements SandboxBackend {
     } catch {}
 
     const containerName = createDockerContainerName(options.cwd);
+    const terminalCommand = createInteractiveTerminalCommand(command, args);
 
     const dockerArgs = createDockerRunArgs({
       image: this.image,
       containerName,
       workDir: options.cwd,
-      command,
-      args,
+      command: terminalCommand.command,
+      args: terminalCommand.args,
       timeoutMs: options.timeoutMs,
     });
 
@@ -890,9 +1012,12 @@ function shellQuote(value: string): string {
 function uniqueRequiredTools(): string[] {
   return Array.from(
     new Set(
-      EXECUTABLE_LANGUAGES.flatMap(
-        (language) => EXECUTION_TOOL_REQUIREMENTS[language],
-      ),
+      [
+        ...EXECUTABLE_LANGUAGES.flatMap(
+          (language) => EXECUTION_TOOL_REQUIREMENTS[language],
+        ),
+        ...INTERACTIVE_TERMINAL_TOOLS,
+      ],
     ),
   );
 }
@@ -1092,10 +1217,13 @@ export async function getExecutionAvailability(
     const probeError = dockerProbe.error;
 
     for (const language of EXECUTABLE_LANGUAGES) {
-      const missing =
-        EXECUTION_TOOL_REQUIREMENTS[language].filter(
-          (tool) => missingTools.has(tool),
-        );
+      const requiredTools = [
+        ...EXECUTION_TOOL_REQUIREMENTS[language],
+        ...INTERACTIVE_TERMINAL_TOOLS,
+      ];
+      const missing = requiredTools.filter((tool) =>
+        missingTools.has(tool),
+      );
 
       languages[language] =
         !probeError &&
@@ -1180,6 +1308,24 @@ async function requireTools(
   ]) {
     if (!(await commandExists(tool))) {
       return `Code execution is unavailable because the ${tool} runtime is missing from the configured sandbox environment.`;
+    }
+  }
+
+  return null;
+}
+
+async function requireInteractiveTools(
+  language: ExecutionLanguage,
+  backend: SandboxBackend,
+): Promise<string | null> {
+  const missingLanguageTool = await requireTools(language, backend);
+  if (missingLanguageTool) return missingLanguageTool;
+
+  if (backend.name === "docker") return null;
+
+  for (const tool of INTERACTIVE_TERMINAL_TOOLS) {
+    if (!(await commandExists(tool))) {
+      return `Interactive execution is unavailable because the ${tool} terminal wrapper runtime is missing from the configured sandbox environment.`;
     }
   }
 
@@ -2146,7 +2292,7 @@ export function startInteractiveExecution(
         );
       }
 
-      const missing = await requireTools(language, backend);
+      const missing = await requireInteractiveTools(language, backend);
 
       if (missing) {
         return finishResult(unavailable(missing, start));

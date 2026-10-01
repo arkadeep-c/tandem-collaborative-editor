@@ -87,6 +87,7 @@ if (isLocalDb()) {
         .notNull()
         .references(() => documents.id, { onDelete: "cascade" }),
       locked: integer("locked", { mode: "boolean" }).notNull().default(false),
+      templateMode: text("template_mode").notNull().default("starter"),
       createdAt: integer("created_at", { mode: "timestamp" })
         .notNull()
         .$defaultFn(() => new Date()),
@@ -183,6 +184,7 @@ if (isLocalDb()) {
         .notNull()
         .references(() => documents.id, { onDelete: "cascade" }),
       locked: boolean("locked").notNull().default(false),
+      templateMode: text("template_mode").notNull().default("starter"),
       createdAt: timestamp("created_at", { withTimezone: true })
         .defaultNow()
         .notNull(),

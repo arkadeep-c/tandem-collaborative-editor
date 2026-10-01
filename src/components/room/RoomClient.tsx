@@ -5,7 +5,7 @@ import Link from "next/link";
 import EditorRoom from "@/components/editor/EditorRoom";
 import JoinGate from "@/components/room/JoinGate";
 import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
-import type { ClientUser, RoomRole } from "@/lib/types";
+import type { ClientUser, RoomRole, RoomTemplateMode } from "@/lib/types";
 import { Loader2 } from "lucide-react";
 
 interface RoomClientProps {
@@ -14,7 +14,7 @@ interface RoomClientProps {
 
 export default function RoomClient({ code }: RoomClientProps) {
   const [status, setStatus] = useState<"loading" | "not-found" | "join" | "editor">("loading");
-  const [room, setRoom] = useState<{ code: string; title: string; language: string; locked?: boolean } | null>(null);
+  const [room, setRoom] = useState<{ code: string; title: string; language: string; locked?: boolean; templateMode?: RoomTemplateMode } | null>(null);
   const [you, setYou] = useState<ClientUser | null>(null);
   const [role, setRole] = useState<RoomRole>("editor");
   const [error, setError] = useState<string | null>(null);
@@ -75,7 +75,7 @@ export default function RoomClient({ code }: RoomClientProps) {
       }
 
       const data = (await roomRes.json()) as {
-        room: { code: string; title: string; language: string; locked?: boolean; role: RoomRole };
+        room: { code: string; title: string; language: string; locked?: boolean; templateMode?: RoomTemplateMode; role: RoomRole };
         you: ClientUser;
         sessionToken?: string;
       };

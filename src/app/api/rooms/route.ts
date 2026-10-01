@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { customAlphabet } from "nanoid";
-import { db, isUsingLocalDb } from "@/db";
+import { db, ensureRoomTemplateModeColumn, isUsingLocalDb } from "@/db";
 import { documents, roomMembers, rooms } from "@/db/schema";
 import { generateRoomCode } from "@/lib/roomCode.server";
 import { roomCreateLimiter } from "@/lib/rateLimit";
@@ -13,7 +13,7 @@ import {
   sessionCookieOptions,
   type SessionUser,
 } from "@/lib/session";
-import { LANGUAGE_STARTERS } from "@/lib/types";
+import { initialContentForRoomTemplateMode, type RoomTemplateMode } from "@/lib/roomTemplates";
 import { cleanTitle, isLanguageId } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
@@ -51,6 +51,8 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  await ensureRoomTemplateModeColumn();
+
   const body = (await request.json().catch(() => null)) as {
     title?: unknown;
     language?: unknown;
@@ -58,8 +60,8 @@ export async function POST(request: NextRequest) {
   } | null;
   const title = cleanTitle(body?.title) ?? "Untitled";
   const language = isLanguageId(body?.language) ? body.language : "markdown";
-  const starterRequested = body?.starter === true;
-  const initialContent = starterRequested ? LANGUAGE_STARTERS[language] ?? "" : "";
+  const templateMode: RoomTemplateMode = body?.starter === true ? "starter" : "blank";
+  const initialContent = initialContentForRoomTemplateMode(language, templateMode);
 
   let lastError: unknown = null;
   for (let attempt = 0; attempt < CODE_GENERATION_ATTEMPTS; attempt += 1) {
@@ -87,6 +89,7 @@ export async function POST(request: NextRequest) {
               code,
               ownerId: session!.user.id,
               documentId: d!.id,
+              templateMode,
             })
             .returning()
             .get();
@@ -116,6 +119,7 @@ export async function POST(request: NextRequest) {
               code,
               ownerId: session!.user.id,
               documentId: docRow!.id,
+              templateMode,
             })
             .returning();
           await tx
@@ -133,6 +137,7 @@ export async function POST(request: NextRequest) {
           title: doc!.title,
           language: doc!.language,
           locked: false,
+          templateMode,
         },
       };
       if (issueBearer && !auth.cookieValid) {

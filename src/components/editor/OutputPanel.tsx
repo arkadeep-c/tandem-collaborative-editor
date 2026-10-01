@@ -24,7 +24,6 @@ type TerminalEvent = Extract<
   | { type: "stdout" }
   | { type: "stderr" }
   | { type: "stdin" }
-  | { type: "status" }
   | { type: "error" }
 >;
 
@@ -43,7 +42,6 @@ function isTerminalEvent(event: ExecutionStreamEvent): event is TerminalEvent {
     event.type === "stdout" ||
     event.type === "stderr" ||
     event.type === "stdin" ||
-    event.type === "status" ||
     event.type === "error"
   );
 }
@@ -114,16 +112,15 @@ export default function OutputPanel({
   }, [terminalEvents.length, result?.status]);
 
   useEffect(() => {
-    if (running) inputRef.current?.focus();
-  }, [running]);
+    if (running && streamStatus === "running") inputRef.current?.focus();
+  }, [running, streamStatus]);
 
   const copyOutput = async () => {
     const text = terminalEvents
       .map((event) => {
         if (event.type === "stdout") return event.chunk;
         if (event.type === "stderr") return event.chunk;
-        if (event.type === "stdin") return `$ ${event.chunk}`;
-        if (event.type === "status") return `[${event.status}] ${event.message ?? ""}`.trim();
+        if (event.type === "stdin") return event.chunk;
         if (event.type === "error") return `[error] ${event.message}`;
         return "";
       })
@@ -230,7 +227,13 @@ export default function OutputPanel({
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-auto px-4 py-3 font-mono text-xs">
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-auto px-4 py-3 font-mono text-xs"
+        onClick={() => {
+          if (running) inputRef.current?.focus();
+        }}
+      >
         {terminalEvents.length === 0 && !running && (
           <div className="flex h-full items-center justify-center text-center">
             <div>
@@ -241,50 +244,58 @@ export default function OutputPanel({
         )}
 
         {terminalEvents.length === 0 && running && (
-          <div className="flex items-center gap-2 text-slate-500">
+          <div className="mb-2 flex items-center gap-2 text-slate-500">
             <Loader2 className="h-3.5 w-3.5 animate-spin text-teal-300" />
             Starting sandbox...
           </div>
         )}
 
-        {terminalEvents.map((event, index) => {
-          if (event.type === "status") {
-            return (
-              <div key={index} className="mb-1 flex items-center gap-2 text-[11px] text-slate-500">
-                <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />
-                <span>{event.message ?? event.status}</span>
-              </div>
-            );
-          }
+        <div className="whitespace-pre-wrap break-words leading-relaxed">
+          {terminalEvents.map((event, index) => {
+            if (event.type === "error") {
+              return (
+                <span key={index} className="text-rose-300">
+                  {event.message}
+                </span>
+              );
+            }
 
-          if (event.type === "error") {
-            return (
-              <pre key={index} className="whitespace-pre-wrap break-words text-rose-300">
-                {event.message}
-              </pre>
-            );
-          }
+            if (event.type === "stdin") {
+              return (
+                <span key={index} className="text-cyan-200">
+                  {event.chunk}
+                </span>
+              );
+            }
 
-          if (event.type === "stdin") {
             return (
-              <pre key={index} className="whitespace-pre-wrap break-words text-cyan-200">
-                <span className="select-none text-cyan-500">$ </span>{event.chunk}
-              </pre>
+              <span
+                key={index}
+                className={event.type === "stderr" ? "text-rose-200" : "text-slate-200"}
+              >
+                {event.chunk}
+              </span>
             );
-          }
+          })}
 
-          return (
-            <pre
-              key={index}
-              className={clsx(
-                "whitespace-pre-wrap break-words",
-                event.type === "stderr" ? "text-rose-200" : "text-slate-200",
-              )}
-            >
-              {event.chunk}
-            </pre>
-          );
-        })}
+          {running && onSendInput && streamStatus === "running" && (
+            <form onSubmit={(event) => void submitInput(event)} className="inline">
+              <input
+                ref={inputRef}
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                className="inline min-w-[6ch] max-w-full bg-transparent font-mono text-xs text-cyan-100 caret-teal-300 outline-none placeholder:text-slate-600"
+                placeholder={terminalEvents.length === 0 ? "stdin" : ""}
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="Program stdin"
+              />
+              <button type="submit" className="sr-only">
+                Send input
+              </button>
+            </form>
+          )}
+        </div>
 
         {result?.timedOut && (
           <div className="mt-3 flex items-center gap-2 rounded bg-amber-400/10 px-3 py-2 text-amber-200">
@@ -299,29 +310,6 @@ export default function OutputPanel({
           </div>
         )}
       </div>
-
-      <form onSubmit={(event) => void submitInput(event)} className="border-t border-white/[0.06] bg-slate-950/40 px-3 py-2">
-        <div className="flex items-center gap-2 rounded-lg border border-white/[0.08] bg-black/20 px-3 py-2 shadow-inner shadow-black/20 focus-within:border-teal-300/40">
-          <span className="font-mono text-xs text-teal-300">stdin</span>
-          <input
-            ref={inputRef}
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            disabled={!running || !onSendInput}
-            className="min-w-0 flex-1 bg-transparent font-mono text-xs text-slate-100 outline-none placeholder:text-slate-600 disabled:cursor-not-allowed disabled:text-slate-600"
-            placeholder={running ? "Type input and press Enter" : "Run code to send input"}
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <button
-            type="submit"
-            disabled={!running || !onSendInput}
-            className="rounded-md bg-teal-400/10 px-2 py-1 text-[11px] font-semibold text-teal-200 transition hover:bg-teal-400/20 disabled:cursor-not-allowed disabled:bg-white/[0.03] disabled:text-slate-600"
-          >
-            Enter
-          </button>
-        </div>
-      </form>
     </div>
   );
 }

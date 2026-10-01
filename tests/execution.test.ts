@@ -6,8 +6,10 @@ import {
   createDockerContainerName,
   createDockerRunArgs,
   createDockerWorkspaceMount,
+  createInteractiveTerminalCommand,
   executeCode,
   getExecutionAvailability,
+  INTERACTIVE_TERMINAL_WRAPPER,
   startInteractiveExecution,
   type InteractiveExecutionHandle,
   getHostExecutionPath,
@@ -177,6 +179,39 @@ describe("Docker execution readiness", () => {
     expect(script).toContain("ulimit -f 4096");
     expect(script).toContain("ulimit -u 96");
     expect(script).not.toContain("ulimit -v");
+  });
+
+  it("wraps interactive programs in an in-container PTY without changing Docker TTY flags", () => {
+    const terminal = createInteractiveTerminalCommand("./main", ["--sample"]);
+    expect(terminal.command).toBe("python3");
+    expect(terminal.args.slice(0, 3)).toEqual(["-c", INTERACTIVE_TERMINAL_WRAPPER, "./main"]);
+    expect(terminal.args).toContain("--sample");
+    expect(INTERACTIVE_TERMINAL_WRAPPER).toContain("os.openpty()");
+    expect(INTERACTIVE_TERMINAL_WRAPPER).toContain("termios.ECHO");
+    expect(INTERACTIVE_TERMINAL_WRAPPER).toContain("stderr=subprocess.PIPE");
+
+    const args = createDockerRunArgs({
+      image: "tandem-executor:test",
+      containerName: "tandem-exec-pty-test",
+      workDir: "/tmp/tandem-exec-pty-test",
+      command: terminal.command,
+      args: terminal.args,
+      timeoutMs: 10_000,
+    });
+
+    const imageIndex = args.indexOf("tandem-executor:test");
+    expect(args).toContain("-i");
+    expect(args).not.toContain("-t");
+    expect(args[imageIndex + 1]).toBe("-i");
+    expect(args).toEqual(expect.arrayContaining([
+      "--network", "none",
+      "--cpus", "0.5",
+      "--memory", String(768 * 1024 * 1024),
+      "--pids-limit", "96",
+      "--read-only",
+      "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+      "--user", "65534:65534",
+    ]));
   });
 
   it("checks language runtimes inside the Docker image instead of on the host", async () => {
@@ -481,6 +516,38 @@ print(first + second + third)
     expect(execution.result.stdout.trim()).toBe("35");
   }, 20_000);
 
+  it("streams an unflushed C prompt before accepting stdin", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "c",
+      `#include <stdio.h>
+int main(void) {
+    int a, b;
+    printf("Enter two numbers: ");
+    if (scanf("%d %d", &a, &b) != 2) return 2;
+    printf("Sum = %d\\n", a + b);
+    return 0;
+}
+`,
+      async (handle, events) => {
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("Enter two numbers:"),
+        );
+        expect(events.some((event) => event.type === "stdout" && event.chunk.includes("Sum ="))).toBe(false);
+        handle.writeStdin("2 3\n");
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout).toContain("Enter two numbers:");
+    expect(execution.result.stdout).toContain("Sum = 5");
+  }, 20_000);
+
   it("streams a prompt before accepting stdin", async () => {
     const execution = await runInteractiveDockerWhenReady(
       "python",
@@ -505,6 +572,47 @@ print(" got " + value)
     expect(execution.result.status).toBe("success");
     expect(execution.result.stdout).toContain("Enter number:");
     expect(execution.result.stdout).toContain("got 7");
+  }, 20_000);
+
+  it("streams sequential C prompts before each stdin line", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "c",
+      `#include <stdio.h>
+int main(void) {
+    int n;
+    printf("Enter 1: ");
+    if (scanf("%d", &n) != 1) return 2;
+    printf("Enter 2: ");
+    if (scanf("%d", &n) != 1) return 3;
+    printf("Done\\n");
+    return 0;
+}
+`,
+      async (handle, events) => {
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("Enter 1:"),
+        );
+        expect(events.some((event) => event.type === "stdout" && event.chunk.includes("Enter 2:"))).toBe(false);
+        handle.writeStdin("2\n");
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("Enter 2:"),
+        );
+        expect(events.some((event) => event.type === "stdout" && event.chunk.includes("Done"))).toBe(false);
+        handle.writeStdin("3\n");
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout).toContain("Enter 1:");
+    expect(execution.result.stdout).toContain("Enter 2:");
+    expect(execution.result.stdout).toContain("Done");
   }, 20_000);
 
   it("runs programs that exit without stdin", async () => {

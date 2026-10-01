@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { desc, eq, inArray } from "drizzle-orm";
-import { db } from "@/db";
+import { db, ensureRoomTemplateModeColumn } from "@/db";
 import { documents, roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
+import { normalizeRoomTemplateMode } from "@/lib/roomTemplates";
 import { getAuthenticatedSessionFromRequest } from "@/lib/session";
 import type { RoomSummary } from "@/lib/types";
 import { count as drizzleCount } from "drizzle-orm";
@@ -17,6 +18,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Session expired." }, { status: 401 });
   }
 
+  await ensureRoomTemplateModeColumn();
+
   const memberships = await db
     .select({
       code: rooms.code,
@@ -25,6 +28,7 @@ export async function GET(request: NextRequest) {
       language: documents.language,
       roomId: rooms.id,
       locked: rooms.locked,
+      templateMode: rooms.templateMode,
       createdAt: rooms.createdAt,
       updatedAt: rooms.updatedAt,
     })
@@ -59,6 +63,7 @@ export async function GET(request: NextRequest) {
     language: m.language,
     role: m.role === "owner" ? "owner" : "editor",
     locked: Boolean(m.locked),
+    templateMode: normalizeRoomTemplateMode(m.templateMode),
     memberCount: memberCounts.get(m.roomId) ?? 1,
     activeUsers: roomEngine.getActiveCount(m.code),
     createdAt: m.createdAt.toISOString(),

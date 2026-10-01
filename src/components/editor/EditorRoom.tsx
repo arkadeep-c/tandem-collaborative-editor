@@ -45,8 +45,10 @@ import {
   type ClientUser,
   type RoomMemberInfo,
   type RoomRole,
+  type RoomTemplateMode,
 } from "@/lib/types";
 import { apiFetch, ensureClientSession } from "@/lib/apiFetch";
+import { starterTemplatesEnabled } from "@/lib/roomTemplates";
 import {
   isExecutionLanguage,
   type ExecutionAvailability,
@@ -65,7 +67,7 @@ type EditorConfirmation =
   | null;
 
 interface EditorRoomProps {
-  room: { code: string; title: string; language: string; locked?: boolean };
+  room: { code: string; title: string; language: string; locked?: boolean; templateMode?: RoomTemplateMode };
   you: ClientUser;
   role: RoomRole;
 }
@@ -124,6 +126,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const isExecutable = isExecutionLanguage(state.language);
   const hasPreview = isMarkdown || isHtml || isCss;
   const hasResultPane = isExecutable || state.language === "json";
+  const starterEnabled = starterTemplatesEnabled(room.templateMode);
   const hasCompanionPane = hasPreview || hasResultPane;
   const viewMode = manualViewMode ?? (hasPreview ? "split" : "edit");
 
@@ -601,6 +604,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   }, []);
 
   const insertStarterTemplate = useCallback(() => {
+    if (!starterEnabled) return;
     const starter = LANGUAGE_STARTERS[state.language as keyof typeof LANGUAGE_STARTERS];
     if (!starter) return;
     const current = getCurrentContent();
@@ -613,7 +617,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       return;
     }
     applyStarterTemplate(starter);
-  }, [applyStarterTemplate, getCurrentContent, state.language]);
+  }, [applyStarterTemplate, getCurrentContent, starterEnabled, state.language]);
 
 
   const submitConfirmation = useCallback(async () => {
@@ -913,13 +917,15 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
                 </button>
               </>
             )}
-            <button
-              onClick={insertStarterTemplate}
-              className="hidden rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10 lg:inline-flex"
-              title="Insert or replace with the selected language starter template"
-            >
-              Starter
-            </button>
+            {starterEnabled && (
+              <button
+                onClick={insertStarterTemplate}
+                className="hidden rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10 lg:inline-flex"
+                title="Insert or replace with the selected language starter template"
+              >
+                Starter
+              </button>
+            )}
             <button
               onClick={() => void copyCode()}
               className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200"

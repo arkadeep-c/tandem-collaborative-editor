@@ -75,6 +75,7 @@ export async function GET(request: NextRequest, ctx: RouteContext) {
           title: room.meta.title,
           language: room.meta.language,
           locked: room.meta.locked,
+          templateMode: room.meta.templateMode,
         },
         you: { user, role },
         content: room.content,

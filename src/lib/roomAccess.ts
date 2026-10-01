@@ -1,6 +1,6 @@
 import { and, asc, eq } from "drizzle-orm";
 import type { NextRequest } from "next/server";
-import { db } from "@/db";
+import { db, ensureRoomTemplateModeColumn } from "@/db";
 import {
   documents,
   roomMembers,
@@ -31,6 +31,7 @@ export interface RoomWithDocument {
 export async function findRoomByCode(
   rawCode: string,
 ): Promise<RoomWithDocument | null> {
+  await ensureRoomTemplateModeColumn();
   const code = normalizeRoomCode(rawCode);
   if (!isValidRoomCode(code)) return null;
   const rows = await db

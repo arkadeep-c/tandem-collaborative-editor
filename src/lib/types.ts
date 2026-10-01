@@ -72,11 +72,14 @@ export interface PresenceState {
 /* Rooms                                                               */
 /* ------------------------------------------------------------------ */
 
+export type RoomTemplateMode = "blank" | "starter";
+
 export interface RoomInfo {
   code: string;
   title: string;
   language: string;
   locked: boolean;
+  templateMode?: RoomTemplateMode;
   memberCount: number;
   activeUsers: number;
   createdAt: string;
@@ -94,7 +97,7 @@ export interface RoomSummary extends RoomInfo {
 export type ServerEvent =
   | {
       type: "init";
-      room: { code: string; title: string; language: string; locked: boolean };
+      room: { code: string; title: string; language: string; locked: boolean; templateMode?: RoomTemplateMode };
       you: { user: ClientUser; role: RoomRole };
       content: string;
       revision: number;

@@ -96,6 +96,7 @@ if (globalForDb.__arenaDrizzleDb) {
       owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
       locked INTEGER NOT NULL DEFAULT 0,
+      template_mode TEXT NOT NULL DEFAULT 'starter',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -113,6 +114,9 @@ if (globalForDb.__arenaDrizzleDb) {
   const roomColumns = sqlite.prepare("PRAGMA table_info(rooms)").all() as Array<{ name: string }>;
   if (!roomColumns.some((column) => column.name === "locked")) {
     sqlite.exec("ALTER TABLE rooms ADD COLUMN locked INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!roomColumns.some((column) => column.name === "template_mode")) {
+    sqlite.exec("ALTER TABLE rooms ADD COLUMN template_mode TEXT NOT NULL DEFAULT 'starter'");
   }
 
   dbInstance = drizzle(sqlite);
@@ -153,6 +157,19 @@ if (globalForDb.__arenaDrizzleDb) {
 export const pool = poolInstance;
 export const sqliteDb = sqliteInstance;
 export const db = dbInstance;
+
+let roomTemplateModeColumnPromise: Promise<void> | null = null;
+
+export async function ensureRoomTemplateModeColumn(): Promise<void> {
+  if (shouldUseLocalDb()) return;
+  if (!poolInstance) return;
+
+  roomTemplateModeColumnPromise ??= poolInstance
+    .query("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS template_mode TEXT NOT NULL DEFAULT 'starter'")
+    .then(() => undefined);
+
+  await roomTemplateModeColumnPromise;
+}
 
 export function isUsingLocalDb(): boolean {
   return shouldUseLocalDb();

@@ -1,10 +1,11 @@
 import { randomBytes } from "crypto";
 import { eq } from "drizzle-orm";
-import { db, isUsingLocalDb } from "@/db";
+import { db, ensureRoomTemplateModeColumn, isUsingLocalDb } from "@/db";
 import { documents, rooms } from "@/db/schema";
 import { currentStore, resolveDocStore } from "@/lib/collab/store";
 import { applyOp, rebaseSequentialOps } from "@/lib/ot";
 import { opWithinBounds } from "@/lib/validation";
+import { normalizeRoomTemplateMode, type RoomTemplateMode } from "@/lib/roomTemplates";
 import type {
   ClientUser,
   PresenceState,
@@ -50,6 +51,7 @@ export interface RoomRecord {
   title: string;
   language: string;
   locked: boolean;
+  templateMode?: string | null;
 }
 
 class Room {
@@ -64,13 +66,14 @@ class Room {
   private dirty = false;
   private loaded = false;
 
-  meta: { title: string; language: string; locked: boolean };
+  meta: { title: string; language: string; locked: boolean; templateMode: RoomTemplateMode };
 
   constructor(readonly record: RoomRecord) {
     this.meta = {
       title: record.title,
       language: record.language,
       locked: record.locked,
+      templateMode: normalizeRoomTemplateMode(record.templateMode),
     };
   }
 
@@ -461,6 +464,7 @@ class RoomEngine {
 
   /** Resolve a room record + hot engine room; null when code doesn't exist. */
   async getRoom(code: string): Promise<Room | null> {
+    await ensureRoomTemplateModeColumn();
     const cached = this.rooms.get(code);
     if (cached) {
       await cached.ensureLoaded().catch(() => null);
@@ -476,6 +480,7 @@ class RoomEngine {
         title: documents.title,
         language: documents.language,
         locked: rooms.locked,
+        templateMode: rooms.templateMode,
       })
       .from(rooms)
       .innerJoin(documents, eq(rooms.documentId, documents.id))
