@@ -31,6 +31,7 @@ import {
 } from "@/lib/types";
 import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 import { showToast } from "@/components/ui/Toast";
+import { ConfirmationDialog, InputDialog } from "@/components/ui/TandemDialog";
 
 const DEMO_ROOM_CODE = "TANDEM";
 
@@ -63,6 +64,7 @@ const PILLARS = [
 ];
 
 type Dialog = "create" | "join" | null;
+type RoomActionDialog = { type: "leave" | "delete"; room: RoomSummary } | null;
 
 export default function HomeClient() {
   const router = useRouter();
@@ -70,6 +72,9 @@ export default function HomeClient() {
   const [rooms, setRooms] = useState<RoomSummary[] | null>(null);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [editingProfile, setEditingProfile] = useState(false);
+  const [renamingRoom, setRenamingRoom] = useState<RoomSummary | null>(null);
+  const [roomAction, setRoomAction] = useState<RoomActionDialog>(null);
+  const [actionBusy, setActionBusy] = useState(false);
 
   const [title, setTitle] = useState("");
   const [language, setLanguage] = useState("typescript");
@@ -219,11 +224,21 @@ export default function HomeClient() {
     [router],
   );
 
-  const renameRoom = useCallback(async (room: RoomSummary) => {
-    const next = window.prompt("Rename room", room.title)?.trim();
-    if (!next || next === room.title) return;
+  const renameRoom = useCallback((room: RoomSummary) => {
+    setRenamingRoom(room);
+  }, []);
+
+  const submitRoomRename = useCallback(async (titleValue: string) => {
+    if (!renamingRoom) return;
+    const next = titleValue.trim();
+    if (!next || next === renamingRoom.title) {
+      setRenamingRoom(null);
+      return;
+    }
+
+    setActionBusy(true);
     try {
-      const res = await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}`, {
+      const res = await apiFetch(`/api/rooms/${encodeURIComponent(renamingRoom.code)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: next }),
@@ -234,8 +249,40 @@ export default function HomeClient() {
       void refresh();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Could not rename room.", "error");
+    } finally {
+      setActionBusy(false);
+      setRenamingRoom(null);
     }
-  }, [refresh]);
+  }, [refresh, renamingRoom]);
+
+  const submitRoomAction = useCallback(async () => {
+    if (!roomAction) return;
+    setActionBusy(true);
+    try {
+      if (roomAction.type === "leave") {
+        await apiFetch(`/api/rooms/${encodeURIComponent(roomAction.room.code)}/leave`, { method: "POST" });
+        showToast(`Left room ${roomAction.room.code}`, "success");
+        void refresh();
+      } else {
+        const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomAction.room.code)}/delete`, { method: "DELETE" });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error((err as any).error || "Failed");
+        }
+        showToast(`Deleted room ${roomAction.room.code}`, "success");
+        void refresh();
+      }
+    } catch (err) {
+      if (roomAction.type === "leave") {
+        showToast("Failed to leave room", "error");
+      } else {
+        showToast(err instanceof Error ? err.message : "Failed to delete", "error");
+      }
+    } finally {
+      setActionBusy(false);
+      setRoomAction(null);
+    }
+  }, [refresh, roomAction]);
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#07090f]">
@@ -516,36 +563,14 @@ export default function HomeClient() {
                       </button>
                     )}
                     <button
-                      onClick={async () => {
-                        if (!confirm(`Leave room ${room.code}?`)) return;
-                        try {
-                          await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, { method: "POST" });
-                          showToast(`Left room ${room.code}`, "success");
-                          void refresh();
-                        } catch {
-                          showToast("Failed to leave room", "error");
-                        }
-                      }}
+                      onClick={() => setRoomAction({ type: "leave", room })}
                       className="rounded-md border border-white/10 px-2 py-1 text-[10px] text-slate-500 hover:border-rose-400/30 hover:text-rose-300"
                     >
                       Leave
                     </button>
                     {room.role === "owner" && (
                       <button
-                        onClick={async () => {
-                          if (!confirm(`Delete "${room.title}"?\n\nThis will permanently remove the room and its document.`)) return;
-                          try {
-                            const res = await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/delete`, { method: "DELETE" });
-                            if (!res.ok) {
-                              const err = await res.json().catch(() => ({}));
-                              throw new Error((err as any).error || "Failed");
-                            }
-                            showToast(`Deleted room ${room.code}`, "success");
-                            void refresh();
-                          } catch (e) {
-                            showToast(e instanceof Error ? e.message : "Failed to delete", "error");
-                          }
-                        }}
+                        onClick={() => setRoomAction({ type: "delete", room })}
                         className="rounded-md border border-rose-400/20 bg-rose-400/10 px-2 py-1 text-[10px] font-medium text-rose-300 hover:bg-rose-400/20"
                       >
                         Delete
@@ -753,6 +778,46 @@ export default function HomeClient() {
             </button>
           </div>
         </div>
+      )}
+
+
+      {renamingRoom && (
+        <InputDialog
+          title="Rename room"
+          description={`Update the display title for room ${renamingRoom.code}.`}
+          initialValue={renamingRoom.title}
+          placeholder="Room title"
+          maxLength={120}
+          confirmLabel="Save title"
+          busy={actionBusy}
+          validate={(value) => value.length === 0 ? "Room title cannot be empty." : null}
+          onClose={() => {
+            if (!actionBusy) setRenamingRoom(null);
+          }}
+          onConfirm={submitRoomRename}
+        />
+      )}
+
+      {roomAction && (
+        <ConfirmationDialog
+          title={
+            roomAction.type === "leave"
+              ? `Leave room ${roomAction.room.code}?`
+              : `Delete "${roomAction.room.title}"?`
+          }
+          description={
+            roomAction.type === "leave"
+              ? "This removes the room from Your Rooms for this browser session. Other collaborators keep access."
+              : "This will permanently remove the room and its document for everyone. This action cannot be undone."
+          }
+          confirmLabel={roomAction.type === "leave" ? "Leave room" : "Delete room"}
+          tone={roomAction.type === "delete" ? "destructive" : "default"}
+          busy={actionBusy}
+          onClose={() => {
+            if (!actionBusy) setRoomAction(null);
+          }}
+          onConfirm={submitRoomAction}
+        />
       )}
 
       {editingProfile && user && (

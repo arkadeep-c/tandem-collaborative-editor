@@ -35,6 +35,7 @@ import SafePreview from "@/components/editor/SafePreview";
 import OutputPanel from "@/components/editor/OutputPanel";
 import ProblemsPanel from "@/components/editor/ProblemsPanel";
 import { showToast } from "@/components/ui/Toast";
+import { ConfirmationDialog } from "@/components/ui/TandemDialog";
 import { useCollaborativeDocument } from "@/lib/useCollaborativeDocument";
 import {
   LANGUAGE_OPTIONS,
@@ -50,6 +51,11 @@ import { isExecutionLanguage, type ExecutionAvailability, type ExecutionProblem,
 
 type ViewMode = "edit" | "split" | "preview";
 type BottomTab = "output" | "problems" | "input";
+type EditorConfirmation =
+  | { type: "leave" }
+  | { type: "kick"; member: RoomMemberInfo }
+  | { type: "starter"; starter: string; languageLabel: string }
+  | null;
 
 interface EditorRoomProps {
   room: { code: string; title: string; language: string; locked?: boolean };
@@ -71,6 +77,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   const [memberMenuUserId, setMemberMenuUserId] = useState<string | null>(null);
   const [lockUpdating, setLockUpdating] = useState(false);
   const [kickingUserId, setKickingUserId] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<EditorConfirmation>(null);
 
   // Execution state
   const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
@@ -191,17 +198,10 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     router.push("/");
   }, [router]);
 
-  const leaveRoom = useCallback(async () => {
+  const leaveRoom = useCallback(() => {
     if (leaving) return;
-    if (!window.confirm(`Leave room ${room.code}?\n\nThis removes the room from Your Rooms for this browser session. Use Back/Home if you only want to exit the editor.`)) return;
-    setLeaving(true);
-    try {
-      await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, {
-        method: "POST",
-      });
-    } catch {}
-    router.push("/");
-  }, [leaving, room.code, router]);
+    setConfirmation({ type: "leave" });
+  }, [leaving]);
 
   const toggleRoomLock = useCallback(async () => {
     if (!isOwner || lockUpdating) return;
@@ -222,24 +222,10 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     }
   }, [isOwner, lockUpdating, room.code, roomLocked]);
 
-  const kickMember = useCallback(async (member: RoomMemberInfo) => {
+  const kickMember = useCallback((member: RoomMemberInfo) => {
     if (!isOwner || member.role === "owner" || member.user.id === selfUserId) return;
-    if (!window.confirm(`Remove ${member.user.name} from room ${room.code}?`)) return;
-    setKickingUserId(member.user.id);
-    try {
-      const res = await apiFetch(
-        `/api/rooms/${encodeURIComponent(room.code)}/members/${encodeURIComponent(member.user.id)}/kick`,
-        { method: "POST" },
-      );
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) throw new Error(data.error ?? "Could not remove that member.");
-      setMemberMenuUserId(null);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Could not remove that member.", "error");
-    } finally {
-      setKickingUserId(null);
-    }
-  }, [isOwner, room.code, selfUserId]);
+    setConfirmation({ type: "kick", member });
+  }, [isOwner, selfUserId]);
 
   const openPanelSurface = useCallback((tab: BottomTab) => {
     setBottomTab(tab);
@@ -479,23 +465,80 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
     }
   }, [getCurrentContent, makeJsonProblem, openPanelSurface, setProblemMarkers, state.language]);
 
-  const insertStarterTemplate = useCallback(() => {
-    const starter = LANGUAGE_STARTERS[state.language as keyof typeof LANGUAGE_STARTERS];
-    if (!starter) return;
-    const current = getCurrentContent();
-    if (current.trim().length > 0) {
-      const ok = window.confirm(
-        `Replace the current document with the ${LANGUAGE_OPTIONS.find((l) => l.id === state.language)?.label ?? state.language} starter template?\n\nThis is an explicit replace action and cannot be undone after collaborators sync it.`,
-      );
-      if (!ok) return;
-    }
+  const applyStarterTemplate = useCallback((starter: string) => {
     const model = editorRef.current?.getModel();
     if (!model) return;
     editorRef.current.executeEdits("starter-template", [
       { range: model.getFullModelRange(), text: starter },
     ]);
     editorRef.current.focus();
-  }, [getCurrentContent, state.language]);
+  }, []);
+
+  const insertStarterTemplate = useCallback(() => {
+    const starter = LANGUAGE_STARTERS[state.language as keyof typeof LANGUAGE_STARTERS];
+    if (!starter) return;
+    const current = getCurrentContent();
+    if (current.trim().length > 0) {
+      setConfirmation({
+        type: "starter",
+        starter,
+        languageLabel: LANGUAGE_OPTIONS.find((l) => l.id === state.language)?.label ?? state.language,
+      });
+      return;
+    }
+    applyStarterTemplate(starter);
+  }, [applyStarterTemplate, getCurrentContent, state.language]);
+
+
+  const submitConfirmation = useCallback(async () => {
+    if (!confirmation) return;
+
+    if (confirmation.type === "leave") {
+      if (leaving) return;
+      setLeaving(true);
+      try {
+        await apiFetch(`/api/rooms/${encodeURIComponent(room.code)}/leave`, {
+          method: "POST",
+        });
+      } catch {}
+      router.push("/");
+      return;
+    }
+
+    if (confirmation.type === "kick") {
+      const { member } = confirmation;
+      if (!isOwner || member.role === "owner" || member.user.id === selfUserId) {
+        setConfirmation(null);
+        return;
+      }
+      setKickingUserId(member.user.id);
+      try {
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(room.code)}/members/${encodeURIComponent(member.user.id)}/kick`,
+          { method: "POST" },
+        );
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        if (!res.ok) throw new Error(data.error ?? "Could not remove that member.");
+        setMemberMenuUserId(null);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "Could not remove that member.", "error");
+      } finally {
+        setKickingUserId(null);
+        setConfirmation(null);
+      }
+      return;
+    }
+
+    applyStarterTemplate(confirmation.starter);
+    setConfirmation(null);
+  }, [applyStarterTemplate, confirmation, isOwner, leaving, room.code, router, selfUserId]);
+
+  const confirmationBusy =
+    confirmation?.type === "leave"
+      ? leaving
+      : confirmation?.type === "kick"
+        ? kickingUserId === confirmation.member.user.id
+        : false;
 
   const connected = state.connection === "connected";
   const dirty =
@@ -1150,6 +1193,39 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         </span>
         <span className="hidden lg:block">OT-lite · single-order engine</span>
       </footer>
+
+
+      {confirmation && (
+        <ConfirmationDialog
+          title={
+            confirmation.type === "leave"
+              ? `Leave room ${room.code}?`
+              : confirmation.type === "kick"
+                ? `Remove ${confirmation.member.user.name}?`
+                : `Replace with ${confirmation.languageLabel} starter?`
+          }
+          description={
+            confirmation.type === "leave"
+              ? "This removes the room from Your Rooms for this browser session. Use Back or Home if you only want to exit the editor."
+              : confirmation.type === "kick"
+                ? `This removes ${confirmation.member.user.name} from room ${room.code} immediately.`
+                : "This explicit replace action will sync to collaborators and cannot be undone once applied."
+          }
+          confirmLabel={
+            confirmation.type === "leave"
+              ? "Leave room"
+              : confirmation.type === "kick"
+                ? "Remove member"
+                : "Replace document"
+          }
+          tone={confirmation.type === "starter" ? "default" : "destructive"}
+          busy={confirmationBusy}
+          onClose={() => {
+            if (!confirmationBusy) setConfirmation(null);
+          }}
+          onConfirm={submitConfirmation}
+        />
+      )}
 
       {editingProfile && (
         <ProfileDialog
