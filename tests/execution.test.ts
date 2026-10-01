@@ -641,11 +641,11 @@ b = int(input())
 print(a + b)
 `, "10\n25\n"],
       ["javascript", `const fs = require("fs");
-const [a, b] = fs.readFileSync(0, "utf8").trim().split(/\s+/).map(Number);
+const [a, b] = fs.readFileSync(0, "utf8").trim().split(/\\s+/).map(Number);
 console.log(a + b);
 `, "10\n25\n"],
       ["typescript", `const fs = require("fs");
-const [a, b] = fs.readFileSync(0, "utf8").trim().split(/\s+/).map(Number);
+const [a, b] = fs.readFileSync(0, "utf8").trim().split(/\\s+/).map(Number);
 console.log(a + b);
 `, "10\n25\n"],
       ["bash", `read a

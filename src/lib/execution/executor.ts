@@ -1702,34 +1702,12 @@ export async function executeCode(
     args: string[],
     timeoutMs = TIMEOUT_MS,
   ) => {
-    if (command === "node") {
-      console.log(
-        "[TANDEM DEBUG] node stdin:",
-        JSON.stringify(stdin),
-      );
-      console.log(
-        "[TANDEM DEBUG] node args:",
-        JSON.stringify(args),
-      );
-    }
-
     const result = await backend.run(command, args, {
       cwd: workDir,
       stdin,
       timeoutMs,
       signal,
     });
-
-    if (command === "node") {
-      console.log(
-        "[TANDEM DEBUG] node stdout:",
-        JSON.stringify(result.stdout),
-      );
-      console.log(
-        "[TANDEM DEBUG] node stderr:",
-        JSON.stringify(result.stderr),
-      );
-    }
 
     return cleanSpawnResult(result, workDir);
   };
