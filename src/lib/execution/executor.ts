@@ -7,6 +7,7 @@ import { EXECUTABLE_LANGUAGES, type ExecutionAvailability, type ExecutionLanguag
 
 const TIMEOUT_MS = 10_000;
 const COMPILE_TIMEOUT_MS = 8_000;
+export const JAVA_COMPILE_TIMEOUT_MS = 20_000;
 const OUTPUT_LIMIT_BYTES = 1024 * 1024;
 const MAX_CODE_SIZE = 100 * 1024;
 const MAX_STDIN_SIZE = 10 * 1024;
@@ -253,7 +254,7 @@ async function rawSpawn(command: string, args: string[], options: SpawnOptions):
         stdout,
         stderr,
         exitCode: null,
-        timedOut: false,
+        timedOut,
         outputTruncated,
         aborted,
         spawnError: aborted ? "Execution stopped by user." : err.message,
@@ -328,7 +329,6 @@ export function createDockerRunArgs({
     "cd /workspace || exit 111",
     `ulimit -t ${Math.ceil(timeoutMs / 1000) + 1}`,
     `ulimit -f ${FILE_SIZE_BLOCKS}`,
-    `ulimit -v ${Math.floor(MEMORY_LIMIT_BYTES / 1024)}`,
     `ulimit -u ${PROCESS_LIMIT}`,
     "umask 077",
     "exec \"$@\"",
@@ -767,12 +767,23 @@ function isMemoryLimit(result: SpawnResult): boolean {
   return /out of memory|cannot allocate memory|memory exhausted|memory limit|std::bad_alloc/i.test(result.stderr);
 }
 
-function statusFromCompile(result: SpawnResult): ExecutionResult["status"] {
+export function statusFromCompileLifecycle(result: {
+  aborted?: boolean;
+  timedOut?: boolean;
+  outputTruncated?: boolean;
+  stderr?: string;
+}): ExecutionResult["status"] {
   if (result.aborted) return "cancelled";
   if (result.timedOut) return "timeout";
   if (result.outputTruncated) return "output_limit";
-  if (isMemoryLimit(result)) return "memory_limit";
+  if (/out of memory|cannot allocate memory|memory exhausted|memory limit|std::bad_alloc/i.test(result.stderr ?? "")) {
+    return "memory_limit";
+  }
   return "compile_error";
+}
+
+function statusFromCompile(result: SpawnResult): ExecutionResult["status"] {
+  return statusFromCompileLifecycle(result);
 }
 
 function statusFromRun(result: SpawnResult): ExecutionResult["status"] {
@@ -1005,7 +1016,7 @@ export async function executeCode(
       case "java": {
         const filename = JAVA_SOURCE_FILENAME;
         await prepareJavaWorkspace(workDir, code);
-        const compiled = await compile("javac", [...JAVAC_VM_ARGS, filename]);
+        const compiled = await compile("javac", [...JAVAC_VM_ARGS, filename], JAVA_COMPILE_TIMEOUT_MS);
         if (compiled.exitCode !== 0 || compiled.spawnError || compiled.aborted || compiled.timedOut || compiled.outputTruncated) {
           const stderr = compiled.spawnError ? "Java compiler is unavailable in the execution sandbox." : compiled.stderr;
           const status = compiled.spawnError ? "unavailable" : statusFromCompile(compiled);

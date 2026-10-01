@@ -10,6 +10,7 @@ import {
   getExecutionAvailability,
   getHostExecutionPath,
   JAVAC_VM_ARGS,
+  JAVA_COMPILE_TIMEOUT_MS,
   JAVA_MAIN_CLASS,
   JAVA_SOURCE_FILENAME,
   JAVA_VM_ARGS,
@@ -20,6 +21,7 @@ import {
   parseJavaRuntimeErrors,
   parseJsErrors,
   parsePythonErrors,
+  statusFromCompileLifecycle,
 } from "@/lib/execution/executor";
 import { EXECUTABLE_LANGUAGES, isExecutionLanguage, LANGUAGE_CONFIG, type ExecutionLanguage } from "@/lib/execution/types";
 import { LANGUAGE_OPTIONS } from "@/lib/types";
@@ -109,6 +111,7 @@ describe("Docker execution readiness", () => {
     });
     const imageIndex = args.indexOf("tandem-executor:test");
     const dockerStdinIndex = args.indexOf("-i");
+    const script = args[args.indexOf("-lc") + 1];
 
     expect(args[0]).toBe("run");
     expect(args[1]).toBe("--rm");
@@ -116,6 +119,11 @@ describe("Docker execution readiness", () => {
     expect(dockerStdinIndex).toBeLessThan(imageIndex);
     expect(args).not.toContain("-t");
     expect(args[imageIndex + 1]).toBe("-i"); // /usr/bin/env -i still clears the container env.
+    expect(args).toEqual(expect.arrayContaining(["--memory", String(768 * 1024 * 1024), "--pids-limit", "96"]));
+    expect(script).toContain("ulimit -t 11");
+    expect(script).toContain("ulimit -f 4096");
+    expect(script).toContain("ulimit -u 96");
+    expect(script).not.toContain("ulimit -v");
   });
 
   it("checks language runtimes inside the Docker image instead of on the host", async () => {
@@ -157,6 +165,10 @@ describe("Docker execution readiness", () => {
 });
 
 describe("Java sandbox configuration", () => {
+  it("uses a Java-specific bounded compile timeout", () => {
+    expect(JAVA_COMPILE_TIMEOUT_MS).toBe(20_000);
+  });
+
   it("uses container-friendly JVM flags for both javac and java", () => {
     expect(JAVA_VM_ARGS).toEqual(expect.arrayContaining([
       "-Xmx256m",
@@ -192,6 +204,13 @@ describe("Java sandbox configuration", () => {
     } finally {
       await fs.rm(workDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("execution lifecycle classification", () => {
+  it("preserves timeout state for killed compile processes", () => {
+    expect(statusFromCompileLifecycle({ timedOut: true, outputTruncated: false, stderr: "" })).toBe("timeout");
+    expect(statusFromCompileLifecycle({ timedOut: false, outputTruncated: false, stderr: "Main.java:1: error: ';' expected" })).toBe("compile_error");
   });
 });
 
