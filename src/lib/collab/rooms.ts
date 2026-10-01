@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { db, isUsingLocalDb } from "@/db";
 import { documents, rooms } from "@/db/schema";
 import { currentStore, resolveDocStore } from "@/lib/collab/store";
-import { applyOp, transformOp } from "@/lib/ot";
+import { applyOp, rebaseSequentialOps } from "@/lib/ot";
 import { opWithinBounds } from "@/lib/validation";
 import type {
   ClientUser,
@@ -216,15 +216,17 @@ class Room {
         return { stale: true as const };
       }
       const base = this.revision - this.opLog.length;
-      const missed = this.opLog.slice(baseRevision - base);
+      // Snapshot only the operations that existed after the client's base
+      // revision before this submitted batch began. OperationBatch.ops is an
+      // ordered sequential script, so later entries already include earlier
+      // same-batch edits and must not be transformed against them.
+      const missed = this.opLog
+        .slice(baseRevision - base)
+        .map((entry) => entry.op);
       const applied: TextOp[] = [];
       let dropped = 0;
 
-      for (const original of ops) {
-        let op: TextOp | null = original;
-        for (const past of missed) op = op ? transformOp(op, past.op) : null;
-        for (const done of applied) op = op ? transformOp(op, done) : null;
-        if (!op) continue;
+      for (const op of rebaseSequentialOps(ops, missed)) {
         // Post-transform bounds check — untrusted offsets can never
         // escape the live buffer; the op is dropped, order is preserved.
         if (!opWithinBounds(op, this.content.length)) {

@@ -19,8 +19,9 @@ export interface OperationBatch {
   /** Server-issued connection id (from the init snapshot). Verified
    *  server-side: the connection must exist and belong to the caller. */
   connectionId: string;
-  /** Document revision the client computed these ops against. */
+  /** Document revision immediately before the first op in `ops`. */
   baseRevision: number;
+  /** Ordered sequential edit script; each op is based on prior ops in this array. */
   ops: TextOp[];
 }
 
