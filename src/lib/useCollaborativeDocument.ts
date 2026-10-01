@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { applyOp, transformBatch } from "@/lib/ot";
+import { applyOp, rebaseSequentialOps } from "@/lib/ot";
 import type {
   ClientUser,
   CursorPosition,
@@ -221,14 +221,14 @@ export function useCollaborativeDocument(roomCode: string) {
             ...(outstandingRef.current ?? []),
             ...bufferRef.current,
           ];
-          const visual = transformBatch(event.ops, preceding);
+          const visual = rebaseSequentialOps(event.ops, preceding);
           if (outstandingRef.current) {
-            outstandingRef.current = transformBatch(
+            outstandingRef.current = rebaseSequentialOps(
               outstandingRef.current,
               event.ops,
             );
           }
-          bufferRef.current = transformBatch(bufferRef.current, event.ops);
+          bufferRef.current = rebaseSequentialOps(bufferRef.current, event.ops);
           if (visual.length > 0) bridgeRef.current?.applyRemote(visual);
           revisionRef.current = event.revision;
           setState((prev) => ({ ...prev, revision: event.revision }));
