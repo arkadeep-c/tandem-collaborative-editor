@@ -26,11 +26,16 @@ interface MonacoEditorProps {
   language: string;
   users: PresenceState[];
   selfSessionId: string;
+  selfUserId?: string;
   setBridge: (bridge: EditorBridge | null) => void;
   submitLocalOps: (ops: TextOp[]) => void;
   publishPresence: (patch: PresencePatch) => void;
   /** Debounced/trailing full-content mirror (drives the markdown preview). */
   onMirror?: (content: string) => void;
+  fontSize?: number;
+  wordWrap?: "on" | "off";
+  minimap?: boolean;
+  onEditorMount?: (editor: IStandaloneCodeEditor, monaco: any) => void;
 }
 
 const PRESENCE_THROTTLE_MS = 90;
@@ -44,10 +49,15 @@ export default function MonacoEditor({
   language,
   users,
   selfSessionId,
+  selfUserId,
   setBridge,
   submitLocalOps,
   publishPresence,
   onMirror,
+  fontSize = 14,
+  wordWrap,
+  minimap = true,
+  onEditorMount,
 }: MonacoEditorProps) {
   const editorRef = useRef<IStandaloneCodeEditor | null>(null);
   const applyingRemoteRef = useRef(false);
@@ -57,16 +67,25 @@ export default function MonacoEditor({
   const styleTagRef = useRef<HTMLStyleElement | null>(null);
   const lastEditAtRef = useRef(0);
   const presenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const languageRef = useRef(language);
-  languageRef.current = language;
+  const typingStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /* Keep latest callbacks in refs so Monaco listeners never re-subscribe. */
   const submitLocalOpsRef = useRef(submitLocalOps);
-  submitLocalOpsRef.current = submitLocalOps;
   const publishPresenceRef = useRef(publishPresence);
-  publishPresenceRef.current = publishPresence;
   const onMirrorRef = useRef(onMirror);
-  onMirrorRef.current = onMirror;
+
+  useEffect(() => {
+    submitLocalOpsRef.current = submitLocalOps;
+    publishPresenceRef.current = publishPresence;
+    onMirrorRef.current = onMirror;
+  }, [submitLocalOps, publishPresence, onMirror]);
+
+  useEffect(() => {
+    return () => {
+      if (presenceTimeoutRef.current) clearTimeout(presenceTimeoutRef.current);
+      if (typingStopTimeoutRef.current) clearTimeout(typingStopTimeoutRef.current);
+    };
+  }, []);
 
   /* ---------------------------------------------------------------- */
   /* Theme                                                             */
@@ -139,10 +158,20 @@ export default function MonacoEditor({
     }, PRESENCE_THROTTLE_MS);
   }, []);
 
+  const scheduleTypingStop = useCallback(() => {
+    if (typingStopTimeoutRef.current) clearTimeout(typingStopTimeoutRef.current);
+    typingStopTimeoutRef.current = setTimeout(() => {
+      typingStopTimeoutRef.current = null;
+      lastEditAtRef.current = 0;
+      schedulePresencePush();
+    }, TYPING_WINDOW_MS + PRESENCE_THROTTLE_MS);
+  }, [schedulePresencePush]);
+
   const handleMount: OnMount = useCallback(
-    (ed) => {
+    (ed, monaco) => {
       editorRef.current = ed;
       decorationsRef.current = ed.createDecorationsCollection([]);
+      onEditorMount?.(ed, monaco);
 
       ed.onDidChangeModelContent((event) => {
         if (applyingRemoteRef.current) return;
@@ -170,6 +199,7 @@ export default function MonacoEditor({
           lastEditAtRef.current = Date.now();
           submitLocalOpsRef.current(ops);
           schedulePresencePush();
+          scheduleTypingStop();
         }
       });
 
@@ -178,9 +208,16 @@ export default function MonacoEditor({
       ed.onDidChangeModelContent(() => {
         onMirrorRef.current?.(ed.getModel()?.getValue() ?? "");
       });
+      // Keyboard shortcuts that should stay inside the editor/workspace.
+      ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+        window.dispatchEvent(new CustomEvent("tandem-run-code"));
+      });
+      ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+        window.dispatchEvent(new CustomEvent("tandem-save-request"));
+      });
       ed.focus();
     },
-    [schedulePresencePush],
+    [schedulePresencePush, scheduleTypingStop, onEditorMount],
   );
 
   /* ---------------------------------------------------------------- */
@@ -275,8 +312,15 @@ export default function MonacoEditor({
     const tag = styleTagRef.current;
     if (!ed || !model || !tag || !decorationsRef.current) return;
 
-    const peers = users.filter(
-      (u) => u.sessionId !== selfSessionId && u.cursor !== null,
+    const peersBySession = new Map<string, PresenceState>();
+    for (const presence of users) {
+      if (!presence.sessionId || presence.sessionId === selfSessionId) continue;
+      if (selfUserId && presence.user.id === selfUserId) continue;
+      if (!presence.cursor) continue;
+      peersBySession.set(presence.sessionId, presence);
+    }
+    const peers = [...peersBySession.values()].sort((a, b) =>
+      a.sessionId.localeCompare(b.sessionId),
     );
 
     const decorations: monacoEditor.IModelDeltaDecoration[] = [];
@@ -286,9 +330,9 @@ export default function MonacoEditor({
     for (const peer of peers) {
       const id = cssSafe(peer.sessionId);
       const color = peer.user.color;
-      const name = peer.user.name.slice(0, 24);
 
-      // Caret beam + name flag.
+      // Caret beam only. Usernames intentionally stay out of Monaco so
+      // cursor labels can never mismatch collaborator identity.
       const clamped = Math.min(peer.cursor!.offset, maxOffset);
       const at = model.getPositionAt(clamped);
       decorations.push({
@@ -300,7 +344,6 @@ export default function MonacoEditor({
         },
         options: {
           beforeContentClassName: `tandem-caret tandem-caret--${id}`,
-          hoverMessage: { value: `${name} is here` },
           stickiness: 1, // NeverGrowsWhenTypingAtEdges
         },
       });
@@ -329,13 +372,12 @@ export default function MonacoEditor({
 
       css.push(
         `.tandem-caret--${id}{border-left:2px solid ${color};margin-left:-1px;height:100%;box-sizing:border-box;position:relative;pointer-events:none;}`,
-        `.tandem-caret--${id}::before{content:${JSON.stringify(name)};position:absolute;top:-1.5em;left:-2px;background:${color};color:#0b0e14;font-family:var(--font-jetbrains),ui-monospace,monospace;font-size:10px;font-weight:700;line-height:1.5;padding:0 6px;border-radius:4px 4px 4px 1px;white-space:nowrap;box-shadow:0 2px 10px #0008;z-index:30;}`,
       );
     }
 
     decorationsRef.current.set(decorations);
     tag.textContent = css.join("\n");
-  }, [users, selfSessionId]);
+  }, [users, selfSessionId, selfUserId]);
 
   /* ---------------------------------------------------------------- */
   /* Language switching (room-wide meta event)                        */
@@ -350,8 +392,12 @@ export default function MonacoEditor({
     if (monaco) {
       monaco.editor.setModelLanguage(model, monacoLanguageFor(language));
     }
-    ed.updateOptions({ wordWrap: language === "markdown" ? "on" : "off" });
-  }, [language]);
+    ed.updateOptions({ 
+      wordWrap: wordWrap ?? (language === "markdown" ? "on" : "off"),
+      fontSize,
+      minimap: { enabled: minimap },
+    });
+  }, [language, wordWrap, fontSize, minimap]);
 
   return (
     <Editor
@@ -363,7 +409,7 @@ export default function MonacoEditor({
       loading={
         <div className="flex h-full items-center justify-center bg-[#0b0e14]">
           <div className="flex items-center gap-3 text-sm text-slate-500">
-            <span className="h-2 w-2 animate-ping rounded-full bg-violet-400" />
+            <span className="h-2 w-2 animate-ping rounded-full bg-teal-400" />
             Loading Monaco…
           </div>
         </div>
@@ -371,21 +417,23 @@ export default function MonacoEditor({
       options={{
         automaticLayout: true,
         fontFamily: "var(--font-jetbrains), ui-monospace, SFMono-Regular, monospace",
-        fontSize: 14,
+        fontSize,
         fontLigatures: true,
         lineHeight: 1.65,
         padding: { top: 18, bottom: 18 },
         smoothScrolling: true,
         cursorSmoothCaretAnimation: "on",
         cursorBlinking: "smooth",
-        minimap: { enabled: true, scale: 1, showSlider: "mouseover" },
+        minimap: { enabled: minimap, scale: 1, showSlider: "mouseover" },
         scrollBeyondLastLine: false,
         renderLineHighlight: "all",
         bracketPairColorization: { enabled: true },
-        wordWrap: language === "markdown" ? "on" : "off",
+        wordWrap: wordWrap ?? (language === "markdown" ? "on" : "off"),
         tabSize: 2,
         insertSpaces: true,
         contextmenu: true,
+        readOnly: false,
+        domReadOnly: false,
         fixedOverflowWidgets: true,
       }}
     />

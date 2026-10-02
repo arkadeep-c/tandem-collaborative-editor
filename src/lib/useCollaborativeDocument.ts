@@ -1,28 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { transformBatch } from "@/lib/ot";
+import { applyOp, rebaseSequentialOps } from "@/lib/ot";
 import type {
   ClientUser,
   CursorPosition,
   OperationBatch,
   PresenceState,
+  RoomMemberInfo,
   RoomRole,
   SelectionRange,
   ServerEvent,
   TextOp,
 } from "@/lib/types";
-
-/**
- * useCollaborativeDocument — browser-side OT client for one room.
- *
- * Identity enters this hook exclusively FROM the server:
- *   GET /api/session (signed HttpOnly cookie) → stream init snapshot
- *   carries { you, sessionId } — the client never asserts who it is.
- *
- * Sync FSM (see README): revision / outstanding / buffer, with the
- * author's echo acting as the ordered ack.
- */
+import { showToast } from "@/components/ui/Toast";
+import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken } from "@/lib/apiFetch";
 
 export type ConnectionStatus =
   | "connecting"
@@ -41,6 +33,9 @@ export interface CollabState {
   you: ClientUser | null;
   role: RoomRole;
   users: PresenceState[];
+  members: RoomMemberInfo[];
+  locked: boolean;
+  accessRevokedMessage: string | null;
   title: string;
   language: string;
   revision: number;
@@ -63,7 +58,13 @@ const GONE_AFTER_MS = 15_000;
 type SessionResponse = {
   user: { id: string; name: string; color: string };
   fresh: boolean;
+  sessionToken?: string;
 };
+
+function roleForSelf(members: RoomMemberInfo[], userId?: string): RoomRole | null {
+  if (!userId) return null;
+  return members.find((member) => member.user.id === userId)?.role ?? null;
+}
 
 export function useCollaborativeDocument(roomCode: string) {
   const [state, setState] = useState<CollabState>({
@@ -72,6 +73,9 @@ export function useCollaborativeDocument(roomCode: string) {
     you: null,
     role: "editor",
     users: [],
+    members: [],
+    locked: false,
+    accessRevokedMessage: null,
     title: "",
     language: "markdown",
     revision: 0,
@@ -88,6 +92,7 @@ export function useCollaborativeDocument(roomCode: string) {
   const bridgeRef = useRef<EditorBridge | null>(null);
   const snapshotRef = useRef<{ content: string } | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
+  const fetchControllerRef = useRef<AbortController | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presenceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const failuresRef = useRef(0);
@@ -97,13 +102,11 @@ export function useCollaborativeDocument(roomCode: string) {
     [],
   );
 
-  /* ------------------------------------------------------------------ */
-  /* Ops upload                                                          */
-  /* ------------------------------------------------------------------ */
-
   const pump = useCallback(async () => {
     if (outstandingRef.current || bufferRef.current.length === 0) return;
-    if (!sourceRef.current || sourceRef.current.readyState !== EventSource.OPEN) {
+    const hasEventSource = sourceRef.current && sourceRef.current.readyState === EventSource.OPEN;
+    const hasFetchStream = fetchControllerRef.current && !fetchControllerRef.current.signal.aborted;
+    if (!hasEventSource && !hasFetchStream) {
       return;
     }
     if (!connectionIdRef.current) return;
@@ -118,12 +121,11 @@ export function useCollaborativeDocument(roomCode: string) {
     patchState({ unsent: true });
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/rooms/${encodeURIComponent(roomCode)}/operations`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
           body: JSON.stringify(batch),
         },
       );
@@ -136,20 +138,20 @@ export function useCollaborativeDocument(roomCode: string) {
         outstandingRef.current = null;
         bufferRef.current = [];
         revisionRef.current = stale.revision;
+        snapshotRef.current = { content: stale.content };
         bridgeRef.current?.reset(stale.content);
-        patchState({ revision: stale.revision, unsent: false });
+        patchState({ revision: stale.revision, syncedRevision: stale.revision, unsent: false });
         return;
       }
       if (!res.ok) throw new Error(`operations failed: ${res.status}`);
-      // Success completes via the ordered stream echo.
     } catch {
-      // Transport/security failure — close the stream and let the
-      // reconnect path restore an authoritative snapshot.
       outstandingRef.current = null;
       bufferRef.current = [];
       patchState({ unsent: false });
       sourceRef.current?.close();
       sourceRef.current = null;
+      fetchControllerRef.current?.abort();
+      fetchControllerRef.current = null;
       patchState({ connection: "reconnecting" });
       reconnectTimerRef.current = setTimeout(
         () => void openStreamRef.current(),
@@ -159,11 +161,9 @@ export function useCollaborativeDocument(roomCode: string) {
   }, [roomCode, patchState]);
 
   const pumpRef = useRef(pump);
-  pumpRef.current = pump;
-
-  /* ------------------------------------------------------------------ */
-  /* Event stream                                                        */
-  /* ------------------------------------------------------------------ */
+  useEffect(() => {
+    pumpRef.current = pump;
+  }, [pump]);
 
   const openStreamRef = useRef<() => Promise<void>>(async () => {});
 
@@ -188,15 +188,24 @@ export function useCollaborativeDocument(roomCode: string) {
             you: event.you.user,
             role: event.you.role,
             users: event.users,
+            members: event.members ?? [],
+            locked: event.room.locked ?? false,
+            accessRevokedMessage: null,
             title: event.room.title,
             language: event.room.language,
             revision: event.revision,
+            syncedRevision: event.revision,
             cacheMode: event.cacheMode,
             unsent: false,
           }));
           break;
         }
         case "op": {
+          if (snapshotRef.current && event.ops.length > 0) {
+            for (const op of event.ops) {
+              snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
+            }
+          }
           if (event.by === connectionIdRef.current) {
             revisionRef.current = event.revision;
             outstandingRef.current = null;
@@ -212,14 +221,14 @@ export function useCollaborativeDocument(roomCode: string) {
             ...(outstandingRef.current ?? []),
             ...bufferRef.current,
           ];
-          const visual = transformBatch(event.ops, preceding);
+          const visual = rebaseSequentialOps(event.ops, preceding);
           if (outstandingRef.current) {
-            outstandingRef.current = transformBatch(
+            outstandingRef.current = rebaseSequentialOps(
               outstandingRef.current,
               event.ops,
             );
           }
-          bufferRef.current = transformBatch(bufferRef.current, event.ops);
+          bufferRef.current = rebaseSequentialOps(bufferRef.current, event.ops);
           if (visual.length > 0) bridgeRef.current?.applyRemote(visual);
           revisionRef.current = event.revision;
           setState((prev) => ({ ...prev, revision: event.revision }));
@@ -236,14 +245,100 @@ export function useCollaborativeDocument(roomCode: string) {
                 : prev.users.map((u) =>
                     u.sessionId === event.user.sessionId ? event.user : u,
                   );
-            return { ...prev, users };
+            const you = prev.you?.id === event.user.user.id ? event.user.user : prev.you;
+            const onlineIds = new Set(users.map((presence) => presence.user.id));
+            const members = prev.members.map((member) =>
+              member.user.id === event.user.user.id
+                ? {
+                    ...member,
+                    user: event.user.user,
+                    online: onlineIds.has(member.user.id),
+                  }
+                : { ...member, online: onlineIds.has(member.user.id) },
+            );
+            return { ...prev, users, members, you };
           });
           break;
         }
         case "leave": {
+          setState((prev) => {
+            const users = prev.users.filter((u) => u.sessionId !== event.sessionId);
+            const onlineIds = new Set(users.map((presence) => presence.user.id));
+            return {
+              ...prev,
+              users,
+              members: prev.members.map((member) => ({
+                ...member,
+                online: onlineIds.has(member.user.id),
+              })),
+            };
+          });
+          break;
+        }
+        case "member_join": {
+          showToast(`${event.user.name} joined your coding room`, "info");
+          setState((prev) => {
+            const members = event.members ?? prev.members;
+            return {
+              ...prev,
+              members,
+              role: roleForSelf(members, prev.you?.id) ?? prev.role,
+            };
+          });
+          break;
+        }
+        case "member_leave": {
+          showToast(`${event.user.name} left the room`, "info");
+          setState((prev) => {
+            const members = event.members ?? prev.members;
+            return {
+              ...prev,
+              members,
+              role: roleForSelf(members, prev.you?.id) ?? prev.role,
+            };
+          });
+          break;
+        }
+        case "member_kick": {
+          showToast(`${event.user.name} was removed from the room`, "info");
+          setState((prev) => {
+            const members = event.members ?? prev.members;
+            return {
+              ...prev,
+              members,
+              role: roleForSelf(members, prev.you?.id) ?? prev.role,
+            };
+          });
+          break;
+        }
+        case "members": {
+          setState((prev) => {
+            const members = event.members ?? prev.members;
+            return {
+              ...prev,
+              members,
+              role: roleForSelf(members, prev.you?.id) ?? prev.role,
+            };
+          });
+          break;
+        }
+        case "room_lock": {
+          showToast(event.locked ? "Room locked" : "Room unlocked", "info");
+          setState((prev) => ({ ...prev, locked: event.locked }));
+          break;
+        }
+        case "access_revoked": {
+          showToast(event.message, "error");
+          sourceRef.current?.close();
+          sourceRef.current = null;
+          fetchControllerRef.current?.abort();
+          fetchControllerRef.current = null;
           setState((prev) => ({
             ...prev,
-            users: prev.users.filter((u) => u.sessionId !== event.sessionId),
+            connection: "error",
+            accessRevokedMessage: event.message,
+            users: [],
+            members: [],
           }));
           break;
         }
@@ -269,22 +364,83 @@ export function useCollaborativeDocument(roomCode: string) {
       }
     };
 
-    const open = async () => {
+    const parseSseChunk = (chunk: string, buffer: { text: string }) => {
+      buffer.text += chunk;
+      const events: { event: string; data: string }[] = [];
+      let idx: number;
+      while ((idx = buffer.text.indexOf("\n\n")) !== -1) {
+        const raw = buffer.text.slice(0, idx);
+        buffer.text = buffer.text.slice(idx + 2);
+        if (!raw.trim() || raw.startsWith(":")) continue; // ping or empty
+        let eventName = "message";
+        let data = "";
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            data += line.slice(5).trim();
+          }
+        }
+        if (data) {
+          events.push({ event: eventName, data });
+        }
+      }
+      return events;
+    };
+
+    const openFetchStream = async () => {
       if (disposed) return;
       try {
-        // Ensure the cookie session exists before opening the stream
-        // (covers expiry between page load and connect).
-        const res = await fetch("/api/session", { credentials: "same-origin" });
-        if (!res.ok) throw new Error(`session: ${res.status}`);
-        (await res.json()) as SessionResponse;
-      } catch {
-        scheduleReconnect();
-        return;
-      }
-      if (disposed) return;
+        const controller = new AbortController();
+        fetchControllerRef.current = controller;
 
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(roomCode)}/stream`,
+          {
+            method: "GET",
+            headers: { Accept: "text/event-stream" },
+            signal: controller.signal,
+          },
+        );
+
+        if (!res.ok) throw new Error(`stream: ${res.status}`);
+        if (!res.body) throw new Error("no body");
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        const buf = { text: "" };
+
+        while (!disposed) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          const evts = parseSseChunk(chunk, buf);
+          for (const e of evts) {
+            try {
+              const parsed = JSON.parse(e.data) as ServerEvent;
+              // Ensure event type matches SSE event name if needed
+              if (!parsed.type) {
+                (parsed as any).type = e.event;
+              }
+              handleEvent(parsed);
+            } catch {
+              // ignore malformed
+            }
+          }
+        }
+      } catch (err) {
+        if (disposed) return;
+        if ((err as any)?.name === "AbortError") return;
+        fetchControllerRef.current = null;
+        scheduleReconnect();
+      }
+    };
+
+    const openEventSource = async () => {
+      if (disposed) return;
       const source = new EventSource(
         `/api/rooms/${encodeURIComponent(roomCode)}/stream`,
+        { withCredentials: true } as EventSourceInit,
       );
       sourceRef.current = source;
 
@@ -293,6 +449,12 @@ export function useCollaborativeDocument(roomCode: string) {
         "op",
         "presence",
         "leave",
+        "member_join",
+        "member_leave",
+        "member_kick",
+        "members",
+        "room_lock",
+        "access_revoked",
         "meta",
         "saved",
       ] as const) {
@@ -313,6 +475,35 @@ export function useCollaborativeDocument(roomCode: string) {
       };
     };
 
+    const open = async () => {
+      if (disposed) return;
+      try {
+        console.log("[SSE] SESSION_BOOTSTRAP start");
+        const diag = getAuthDiagnostics();
+        console.log("[SSE] COOKIE_AVAILABLE", { available: diag.cookieAvailable });
+        console.log("[SSE] MEMORY_TOKEN_AVAILABLE", { available: diag.memoryToken });
+        console.log("[SSE] WINDOW_NAME_TOKEN_AVAILABLE", { available: diag.windowNameToken });
+        const sessData = (await ensureClientSession()) as SessionResponse | null | undefined;
+        if (!sessData || !sessData.user) {
+          console.error("[SSE] SESSION_BOOTSTRAP invalid data", { sessData });
+          throw new Error("Invalid session");
+        }
+        console.log("[SSE] SESSION_READY", { id: sessData.user?.id?.slice(0, 8) });
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      if (disposed) return;
+
+      const token = getStoredToken();
+      console.log("[SSE] SSE_CONNECT", { mode: token ? "bearer-fetch" : "cookie-eventsource", hasToken: !!token });
+      if (token) {
+        await openFetchStream();
+      } else {
+        await openEventSource();
+      }
+    };
+
     const scheduleReconnect = () => {
       if (disposed) return;
       failuresRef.current += 1;
@@ -327,6 +518,8 @@ export function useCollaborativeDocument(roomCode: string) {
       );
     };
 
+    // A reconnect timer needs the latest opener without re-subscribing the stream effect.
+    // eslint-disable-next-line react-hooks/immutability
     openStreamRef.current = open;
     void open();
 
@@ -338,9 +531,16 @@ export function useCollaborativeDocument(roomCode: string) {
             u.sessionId === prev.selfSessionId ||
             now - u.lastActiveAt < GONE_AFTER_MS,
         );
-        return alive.length === prev.users.length
-          ? prev
-          : { ...prev, users: alive };
+        if (alive.length === prev.users.length) return prev;
+        const onlineIds = new Set(alive.map((presence) => presence.user.id));
+        return {
+          ...prev,
+          users: alive,
+          members: prev.members.map((member) => ({
+            ...member,
+            online: onlineIds.has(member.user.id),
+          })),
+        };
       });
     }, 5_000);
 
@@ -348,14 +548,12 @@ export function useCollaborativeDocument(roomCode: string) {
       disposed = true;
       sourceRef.current?.close();
       sourceRef.current = null;
+      fetchControllerRef.current?.abort();
+      fetchControllerRef.current = null;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (presenceTimerRef.current) clearInterval(presenceTimerRef.current);
     };
   }, [roomCode, patchState]);
-
-  /* ------------------------------------------------------------------ */
-  /* Public API                                                          */
-  /* ------------------------------------------------------------------ */
 
   const setBridge = useCallback((bridge: EditorBridge | null) => {
     bridgeRef.current = bridge;
@@ -378,10 +576,9 @@ export function useCollaborativeDocument(roomCode: string) {
     (patch: PresencePatch) => {
       const connectionId = connectionIdRef.current;
       if (!connectionId) return;
-      void fetch(`/api/rooms/${encodeURIComponent(roomCode)}/presence`, {
+      void apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}/presence`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
         body: JSON.stringify({ connectionId, ...patch }),
       }).catch(() => undefined);
     },
@@ -390,10 +587,9 @@ export function useCollaborativeDocument(roomCode: string) {
 
   const updateMeta = useCallback(
     async (patch: { title?: string; language?: string }) => {
-      await fetch(`/api/rooms/${encodeURIComponent(roomCode)}`, {
+      await apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
         body: JSON.stringify(patch),
       }).catch(() => undefined);
     },

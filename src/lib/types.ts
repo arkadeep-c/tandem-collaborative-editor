@@ -19,8 +19,9 @@ export interface OperationBatch {
   /** Server-issued connection id (from the init snapshot). Verified
    *  server-side: the connection must exist and belong to the caller. */
   connectionId: string;
-  /** Document revision the client computed these ops against. */
+  /** Document revision immediately before the first op in `ops`. */
   baseRevision: number;
+  /** Ordered sequential edit script; each op is based on prior ops in this array. */
   ops: TextOp[];
 }
 
@@ -34,6 +35,13 @@ export interface ClientUser {
   id: string;
   name: string;
   color: string;
+}
+
+export interface RoomMemberInfo {
+  user: ClientUser;
+  role: RoomRole;
+  joinedAt: string;
+  online: boolean;
 }
 
 export interface CursorPosition {
@@ -64,10 +72,14 @@ export interface PresenceState {
 /* Rooms                                                               */
 /* ------------------------------------------------------------------ */
 
+export type RoomTemplateMode = "blank" | "starter";
+
 export interface RoomInfo {
   code: string;
   title: string;
   language: string;
+  locked: boolean;
+  templateMode?: RoomTemplateMode;
   memberCount: number;
   activeUsers: number;
   createdAt: string;
@@ -85,12 +97,13 @@ export interface RoomSummary extends RoomInfo {
 export type ServerEvent =
   | {
       type: "init";
-      room: { code: string; title: string; language: string };
+      room: { code: string; title: string; language: string; locked: boolean; templateMode?: RoomTemplateMode };
       you: { user: ClientUser; role: RoomRole };
       content: string;
       revision: number;
       sessionId: string;
       users: PresenceState[];
+      members: RoomMemberInfo[];
       cacheMode: "redis" | "memory";
     }
   | {
@@ -101,6 +114,12 @@ export type ServerEvent =
     }
   | { type: "presence"; user: PresenceState }
   | { type: "leave"; sessionId: string; userId: string }
+  | { type: "member_join"; user: ClientUser; members: RoomMemberInfo[] }
+  | { type: "member_leave"; user: ClientUser; members: RoomMemberInfo[] }
+  | { type: "member_kick"; user: ClientUser; members: RoomMemberInfo[] }
+  | { type: "members"; members: RoomMemberInfo[] }
+  | { type: "room_lock"; locked: boolean }
+  | { type: "access_revoked"; reason: "kicked"; message: string }
   | { type: "meta"; title?: string; language?: string }
   | { type: "saved"; revision: number; savedAt: string; mode: "redis" | "memory" }
   | { type: "error"; message: string };
@@ -129,56 +148,19 @@ export interface ApiError {
 /* Languages                                                           */
 /* ------------------------------------------------------------------ */
 
-export interface LanguageOption {
-  id: string;
-  label: string;
-  accent: string;
-}
-
-export const LANGUAGE_OPTIONS: LanguageOption[] = [
-  { id: "typescript", label: "TypeScript", accent: "#3178c6" },
-  { id: "javascript", label: "JavaScript", accent: "#f7df1e" },
-  { id: "python", label: "Python", accent: "#3776ab" },
-  { id: "c", label: "C", accent: "#5c99c9" },
-  { id: "cpp", label: "C++", accent: "#00599c" },
-  { id: "java", label: "Java", accent: "#ed8b00" },
-  { id: "markdown", label: "Markdown", accent: "#a78bfa" },
-  { id: "json", label: "JSON", accent: "#6ee7b7" },
-  { id: "go", label: "Go", accent: "#00add8" },
-  { id: "rust", label: "Rust", accent: "#f97316" },
-  { id: "sql", label: "SQL", accent: "#e38c00" },
-  { id: "html", label: "HTML", accent: "#e34c26" },
-  { id: "css", label: "CSS", accent: "#264de4" },
-  { id: "yaml", label: "YAML", accent: "#cb171e" },
-];
-
-export function languageAccent(language: string): string {
-  return LANGUAGE_OPTIONS.find((l) => l.id === language)?.accent ?? "#8b5cf6";
-}
-
-/**
- * Monaco language ids. Monaco tokenizes C through its `cpp` basic-language
- * (the cpp registration officially owns `.c`/`.h` files — there is no
- * separate 'c' tokenizer), so 'c' documents deliberately use it.
- */
-export function monacoLanguageFor(language: string): string {
-  if (language === "c") return "cpp";
-  return language;
-}
-
-export const LANGUAGE_STARTERS: Record<string, string> = {
-  typescript: `// Shared TypeScript buffer.\n\nexport function main(): void {\n  console.log("hello from the room");\n}\n\nmain();\n`,
-  javascript: `// Shared JavaScript buffer.\n\nfunction main() {\n  console.log("hello from the room");\n}\n\nmain();\n`,
-  python: `# Shared Python buffer.\n\ndef main():\n    print("hello from the room")\n\n\nif __name__ == "__main__":\n    main()\n`,
-  c: `// Shared C buffer.\n\n#include <stdio.h>\n\nint main(void) {\n    printf("hello from the room\\n");\n    return 0;\n}\n`,
-  cpp: `// Shared C++ buffer.\n\n#include <iostream>\n\nint main() {\n    std::cout << "hello from the room" << std::endl;\n    return 0;\n}\n`,
-  java: `// Shared Java buffer.\n\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println("hello from the room");\n    }\n}\n`,
-  markdown: `# Untitled\n\nStart writing — everyone in this room sees every keystroke.\n`,
-  json: `{\n  "name": "untitled",\n  "collaborative": true\n}\n`,
-  go: `package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hello from the room")\n}\n`,
-  rust: `fn main() {\n    println!("hello from the room");\n}\n`,
-  sql: `-- Shared SQL buffer.\n\nSELECT 'hello from the room' AS greeting;\n`,
-  html: `<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="utf-8" />\n    <title>Shared buffer</title>\n  </head>\n  <body></body>\n</html>\n`,
-  css: `/* Shared CSS buffer. */\n\n:root {\n  color-scheme: dark;\n}\n`,
-  yaml: `# Shared YAML buffer.\n\ncollaborative: true\n`,
-};
+export type { LanguageId, LanguageOption } from "@/lib/languageConfig";
+export {
+  LANGUAGE_DEFINITIONS,
+  LANGUAGE_DEFINITION_BY_ID,
+  LANGUAGE_IDS,
+  LANGUAGE_OPTIONS,
+  LANGUAGE_STARTERS,
+  EXECUTABLE_LANGUAGE_IDS,
+  fileExtensionFor,
+  getLanguageDefinition,
+  isExecutableLanguage,
+  isKnownLanguageId,
+  languageAccent,
+  languageLabel,
+  monacoLanguageFor,
+} from "@/lib/languageConfig";

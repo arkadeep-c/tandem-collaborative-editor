@@ -42,7 +42,30 @@ export function applyOp(content: string, op: TextOp): string {
   return content.slice(0, op.offset) + content.slice(op.offset + op.length);
 }
 
-/** Sequential transform of a batch — returns positions valid after all of `against`. */
+/**
+ * Rebase an ordered, already-sequential edit script over operations that were
+ * applied after the script's base revision.
+ *
+ * `ops` entries are NOT transformed against earlier entries in `ops`: their
+ * offsets already include the effects of previous entries in the same script.
+ * This is the wire semantic used by OperationBatch.ops.
+ */
+export function rebaseSequentialOps(ops: TextOp[], against: TextOp[]): TextOp[] {
+  const out: TextOp[] = [];
+  for (const original of ops) {
+    let op: TextOp | null = original;
+    for (const past of against) op = op ? transformOp(op, past) : null;
+    if (op) out.push(op);
+  }
+  return out;
+}
+
+/**
+ * Transform a same-base operation set into sequential application order.
+ *
+ * This helper self-transforms later entries against earlier transformed output
+ * entries. Do not use it for OperationBatch.ops, which are already sequential.
+ */
 export function transformBatch(ops: TextOp[], against: TextOp[]): TextOp[] {
   const out: TextOp[] = [];
   for (const original of ops) {

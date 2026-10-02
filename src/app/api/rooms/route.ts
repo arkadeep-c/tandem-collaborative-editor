@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { customAlphabet } from "nanoid";
-import { db } from "@/db";
+import { db, ensureRoomTemplateModeColumn, isUsingLocalDb } from "@/db";
 import { documents, roomMembers, rooms } from "@/db/schema";
 import { generateRoomCode } from "@/lib/roomCode.server";
 import { roomCreateLimiter } from "@/lib/rateLimit";
 import {
   createSession,
-  getSessionUser,
+  createBearerToken,
+  getAuthenticatedSessionFromRequest,
   serializeSessionCookie,
   SESSION_COOKIE,
   sessionCookieOptions,
   type SessionUser,
 } from "@/lib/session";
-import { LANGUAGE_STARTERS } from "@/lib/types";
+import { initialContentForRoomTemplateMode, type RoomTemplateMode } from "@/lib/roomTemplates";
 import { cleanTitle, isLanguageId } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
@@ -25,20 +26,22 @@ const newInternalId = customAlphabet(
 const CODE_GENERATION_ATTEMPTS = 5;
 
 /**
- * POST /api/rooms — create a room.
- *
- * The creator is ALWAYS the verified session user — the request body may
- * carry a title and a language, never an identity. The server mints a
- * unique human-friendly code (retrying on the UNIQUE constraint), creates
- * the backing document, and records the creator as owner-member.
+ * POST /api/rooms — create a room. Accepts cookie OR bearer fallback.
  */
 export async function POST(request: NextRequest) {
-  let session: SessionUser | null = await getSessionUser();
+  const auth = await getAuthenticatedSessionFromRequest(request);
+  let session: SessionUser | null = auth.session;
   let issueCookie: string | null = null;
+  let issueBearer: string | null = null;
+
   if (!session) {
     const created = await createSession();
     session = { sessionId: created.sessionId, user: created.user };
     issueCookie = serializeSessionCookie(created.token);
+    issueBearer = createBearerToken(created.sessionId);
+  } else if (!auth.cookieValid) {
+    // Authenticated via bearer, ensure client keeps token
+    issueBearer = createBearerToken(session.sessionId);
   }
 
   if (!roomCreateLimiter.hit(session.user.id)) {
@@ -48,52 +51,100 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  await ensureRoomTemplateModeColumn();
+
   const body = (await request.json().catch(() => null)) as {
     title?: unknown;
     language?: unknown;
+    starter?: unknown;
   } | null;
   const title = cleanTitle(body?.title) ?? "Untitled";
   const language = isLanguageId(body?.language) ? body.language : "markdown";
+  const templateMode: RoomTemplateMode = body?.starter === true ? "starter" : "blank";
+  const initialContent = initialContentForRoomTemplateMode(language, templateMode);
 
   let lastError: unknown = null;
   for (let attempt = 0; attempt < CODE_GENERATION_ATTEMPTS; attempt += 1) {
     const code = generateRoomCode();
     try {
-      const [doc, room] = await db.transaction(async (tx) => {
-        const [d] = await tx
-          .insert(documents)
-          .values({
-            id: newInternalId(),
-            title,
-            language,
-            content: LANGUAGE_STARTERS[language] ?? "",
-          })
-          .returning();
-        const [r] = await tx
-          .insert(rooms)
-          .values({
-            id: newInternalId(),
-            code,
-            ownerId: session.user.id,
-            documentId: d!.id,
-          })
-          .returning();
-        await tx
-          .insert(roomMembers)
-          .values({ roomId: r!.id, userId: session.user.id, role: "owner" });
-        return [d, r] as const;
-      });
+      let doc: any;
+      let room: any;
 
-      const response = NextResponse.json(
-        {
-          room: {
-            code: room!.code,
-            title: doc!.title,
-            language: doc!.language,
-          },
+      if (isUsingLocalDb()) {
+        const result = (db as any).transaction((tx: any) => {
+          const d = tx
+            .insert(documents)
+            .values({
+              id: newInternalId(),
+              title,
+              language,
+              content: initialContent,
+            })
+            .returning()
+            .get();
+          const r = tx
+            .insert(rooms)
+            .values({
+              id: newInternalId(),
+              code,
+              ownerId: session!.user.id,
+              documentId: d!.id,
+              templateMode,
+            })
+            .returning()
+            .get();
+          tx.insert(roomMembers).values({
+            roomId: r!.id,
+            userId: session!.user.id,
+            role: "owner",
+          }).run();
+          return [d, r] as const;
+        });
+        [doc, room] = result;
+      } else {
+        const [d, r] = await (db as any).transaction(async (tx: any) => {
+          const [docRow] = await tx
+            .insert(documents)
+            .values({
+              id: newInternalId(),
+              title,
+              language,
+              content: initialContent,
+            })
+            .returning();
+          const [roomRow] = await tx
+            .insert(rooms)
+            .values({
+              id: newInternalId(),
+              code,
+              ownerId: session!.user.id,
+              documentId: docRow!.id,
+              templateMode,
+            })
+            .returning();
+          await tx
+            .insert(roomMembers)
+            .values({ roomId: roomRow!.id, userId: session!.user.id, role: "owner" });
+          return [docRow, roomRow] as const;
+        });
+        doc = d;
+        room = r;
+      }
+
+      const responseBody: any = {
+        room: {
+          code: room!.code,
+          title: doc!.title,
+          language: doc!.language,
+          locked: false,
+          templateMode,
         },
-        { status: 201 },
-      );
+      };
+      if (issueBearer && !auth.cookieValid) {
+        responseBody.sessionToken = issueBearer;
+      }
+
+      const response = NextResponse.json(responseBody, { status: 201 });
       if (issueCookie) {
         response.cookies.set(
           SESSION_COOKIE,
@@ -104,13 +155,13 @@ export async function POST(request: NextRequest) {
       return response;
     } catch (err) {
       lastError = err;
-      // Retry only on UNIQUE conflicts (code collision); anything else is fatal.
-      if (
-        typeof err === "object" &&
-        err !== null &&
-        "code" in err &&
-        (err as { code?: string }).code === "23505"
-      ) {
+      const isUniqueConflict =
+        (typeof err === "object" &&
+          err !== null &&
+          "code" in err &&
+          (err as { code?: string }).code === "23505") ||
+        (err instanceof Error && /UNIQUE|unique/i.test(err.message));
+      if (isUniqueConflict) {
         continue;
       }
       break;

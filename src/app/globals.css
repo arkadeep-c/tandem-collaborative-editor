@@ -1,13 +1,54 @@
 @import "tailwindcss";
 
 @theme inline {
-  --font-sans: var(--font-grotesk), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-jetbrains), ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* System font fallback — no Google Fonts network required for build */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+:root {
+  --tandem-bg: #050814;
+  --tandem-panel: #0a1020;
+  --tandem-panel-strong: #0d1424;
+  --tandem-line: rgba(148, 163, 184, 0.14);
+  --tandem-cyan: #67e8f9;
+  --tandem-blue: #60a5fa;
+  --tandem-violet: #a78bfa;
+  --tandem-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --tandem-fast: 150ms;
+  --tandem-base: 240ms;
+  --tandem-slow: 620ms;
+}
+
+html {
+  background: var(--tandem-bg);
+  scroll-behavior: smooth;
+}
+
+body {
+  background:
+    radial-gradient(circle at 20% -10%, rgba(34, 211, 238, 0.12), transparent 32rem),
+    radial-gradient(circle at 82% 8%, rgba(139, 92, 246, 0.1), transparent 34rem),
+    var(--tandem-bg);
 }
 
 ::selection {
   background: #8b5cf655;
   color: #f5f3ff;
+}
+
+:focus-visible {
+  outline: 2px solid rgba(103, 232, 249, 0.85);
+  outline-offset: 3px;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  transition-duration: var(--tandem-fast);
+  transition-timing-function: var(--tandem-ease);
 }
 
 /* ------------------------------------------------------------------ */
@@ -29,20 +70,52 @@
   border-radius: 999px;
 }
 
+*::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
 *::-webkit-scrollbar-track {
   background: transparent;
 }
 
 /* ------------------------------------------------------------------ */
-/* Landing backdrop                                                    */
+/* Ambient backdrops and technical motion                              */
 /* ------------------------------------------------------------------ */
 
-.bg-grid {
+.bg-grid,
+.living-grid {
   background-image:
-    linear-gradient(to right, #ffffff08 1px, transparent 1px),
-    linear-gradient(to bottom, #ffffff08 1px, transparent 1px);
+    linear-gradient(to right, rgba(255, 255, 255, 0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.055) 1px, transparent 1px);
   background-size: 56px 56px;
   mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 40%, transparent 100%);
+}
+
+.living-grid::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, rgba(103, 232, 249, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(167, 139, 250, 0.07) 1px, transparent 1px);
+  background-size: 168px 168px;
+  opacity: 0.7;
+  animation: grid-drift 24s linear infinite;
+}
+
+.ambient-spotlight {
+  --ambient-x: 52%;
+  --ambient-y: 12%;
+  background:
+    radial-gradient(circle at var(--ambient-x) var(--ambient-y), rgba(125, 211, 252, 0.16), transparent 24rem),
+    radial-gradient(circle at calc(var(--ambient-x) + 18%) calc(var(--ambient-y) + 24%), rgba(167, 139, 250, 0.1), transparent 26rem);
+  opacity: 0.9;
+  transition: background-position 180ms var(--tandem-ease);
+}
+
+@keyframes grid-drift {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-56px, -56px, 0); }
 }
 
 @keyframes aurora-drift {
@@ -56,9 +129,56 @@
 }
 
 .aurora {
-  animation: aurora-drift 16s ease-in-out infinite;
+  animation: aurora-drift 18s ease-in-out infinite;
   filter: blur(90px);
   will-change: transform;
+}
+
+.network-line {
+  stroke: rgba(125, 211, 252, 0.5);
+  stroke-width: 1;
+  stroke-dasharray: 4 12;
+  animation: network-flow 12s linear infinite;
+}
+
+.network-node {
+  animation: network-pulse 5s ease-in-out infinite;
+}
+
+.data-trail {
+  position: absolute;
+  height: 1px;
+  width: 26rem;
+  background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.52), rgba(167, 139, 250, 0.18), transparent);
+  opacity: 0.42;
+  transform: rotate(-16deg) translateX(-45%);
+  animation: data-trail 10s linear infinite;
+}
+
+.data-trail-a {
+  left: -18rem;
+  top: 22%;
+}
+
+.data-trail-b {
+  right: -20rem;
+  top: 62%;
+  animation-delay: -5s;
+  animation-duration: 13s;
+}
+
+@keyframes network-flow {
+  to { stroke-dashoffset: -160; }
+}
+
+@keyframes network-pulse {
+  0%, 100% { opacity: 0.42; transform: scale(0.9); }
+  50% { opacity: 0.95; transform: scale(1.25); }
+}
+
+@keyframes data-trail {
+  from { transform: rotate(-16deg) translateX(-45%); }
+  to { transform: rotate(-16deg) translateX(145vw); }
 }
 
 @keyframes fade-up {
@@ -73,7 +193,108 @@
 }
 
 .fade-up {
-  animation: fade-up 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: fade-up 0.7s var(--tandem-ease) both;
+}
+
+.premium-panel {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.88), rgba(8, 13, 24, 0.72)),
+    radial-gradient(circle at 20% 0%, rgba(103, 232, 249, 0.08), transparent 16rem);
+  box-shadow:
+    0 24px 80px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(16px);
+}
+
+.premium-border {
+  position: relative;
+}
+
+.premium-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(103, 232, 249, 0.42), rgba(167, 139, 250, 0.22), rgba(15, 23, 42, 0.08));
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.code-scanline::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 26%;
+  background: linear-gradient(180deg, rgba(103, 232, 249, 0.11), transparent);
+  animation: scanline 5.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes scanline {
+  0%, 100% { transform: translateY(-40%); opacity: 0; }
+  18%, 74% { opacity: 0.72; }
+  50% { transform: translateY(330%); opacity: 0.16; }
+}
+
+/* ------------------------------------------------------------------ */
+/* Landing/dashboard custom cursor                                     */
+/* ------------------------------------------------------------------ */
+
+.tandem-cursor-dot,
+.tandem-cursor-follower {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1000;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate3d(calc(var(--cursor-x, -40px) - 50%), calc(var(--cursor-y, -40px) - 50%), 0);
+  transition: opacity 180ms var(--tandem-ease), width 180ms var(--tandem-ease), height 180ms var(--tandem-ease), border-color 180ms var(--tandem-ease), background 180ms var(--tandem-ease);
+}
+
+.tandem-cursor-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(224, 242, 254, 0.95);
+  box-shadow: 0 0 18px rgba(103, 232, 249, 0.55);
+}
+
+.tandem-cursor-follower {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(125, 211, 252, 0.42);
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.04);
+  box-shadow: inset 0 0 18px rgba(103, 232, 249, 0.08);
+}
+
+.tandem-cursor-dot[data-visible="true"],
+.tandem-cursor-follower[data-visible="true"] {
+  opacity: 1;
+}
+
+.tandem-cursor-dot[data-active="true"] {
+  width: 10px;
+  height: 10px;
+  background: rgba(103, 232, 249, 0.98);
+}
+
+.tandem-cursor-follower[data-active="true"] {
+  width: 50px;
+  height: 50px;
+  border-color: rgba(167, 139, 250, 0.62);
+  background: rgba(125, 211, 252, 0.065);
+}
+
+@media (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .has-custom-cursor [data-tandem-home] :is(a, button, [data-cursor="interactive"], [data-cursor="magnetic"]) {
+    cursor: none;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -101,8 +322,44 @@
 /* ------------------------------------------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+
   .aurora,
-  .fade-up {
+  .fade-up,
+  .living-grid::before,
+  .network-line,
+  .network-node,
+  .data-trail,
+  .code-scanline::after {
+    animation: none !important;
+  }
+
+  .tandem-cursor-dot,
+  .tandem-cursor-follower {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .tandem-cursor-dot,
+  .tandem-cursor-follower {
+    display: none;
+  }
+
+  .data-trail,
+  .network-line,
+  .network-node {
     animation: none;
   }
 }

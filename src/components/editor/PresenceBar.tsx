@@ -20,6 +20,7 @@ function initialsOf(name: string): string {
 interface PresenceBarProps {
   users: PresenceState[];
   selfSessionId: string;
+  selfUserId?: string;
   onEditProfile: () => void;
 }
 
@@ -28,17 +29,34 @@ const MAX_VISIBLE = 6;
 export default function PresenceBar({
   users,
   selfSessionId,
+  selfUserId,
   onEditProfile,
 }: PresenceBarProps) {
   const [hovered, setHovered] = useState<string | null>(null);
-  const visible = users.slice(0, MAX_VISIBLE);
-  const overflow = users.length - visible.length;
+  const deduped = Array.from(
+    users.reduce((map, presence) => {
+      const existing = map.get(presence.user.id);
+      if (
+        !existing ||
+        presence.sessionId === selfSessionId ||
+        presence.lastActiveAt > existing.lastActiveAt
+      ) {
+        map.set(presence.user.id, presence);
+      }
+      return map;
+    }, new Map<string, PresenceState>()).values(),
+  ).sort((a, b) => a.joinedAt - b.joinedAt);
+  const visible = deduped.slice(0, MAX_VISIBLE);
+  const overflow = deduped.length - visible.length;
 
   return (
     <div className="flex items-center">
       <div className="flex -space-x-2">
         {visible.map((presence) => {
-          const isSelf = presence.sessionId === selfSessionId;
+          const isSelf =
+            presence.sessionId === selfSessionId ||
+            Boolean(selfUserId && presence.user.id === selfUserId);
+          const isRemoteTyping = !isSelf && presence.typing;
           return (
             <div
               key={presence.sessionId}
@@ -62,7 +80,7 @@ export default function PresenceBar({
                 aria-label={presence.user.name}
               >
                 {initialsOf(presence.user.name)}
-                {presence.typing && (
+                {isRemoteTyping && (
                   <span
                     className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-[#0b0e14]"
                     style={{ backgroundColor: presence.user.color }}
@@ -81,7 +99,7 @@ export default function PresenceBar({
                       you
                     </span>
                   )}
-                  {presence.typing && (
+                  {isRemoteTyping && (
                     <span className="ml-1.5 text-emerald-400">typing…</span>
                   )}
                 </div>
@@ -96,7 +114,7 @@ export default function PresenceBar({
         )}
       </div>
       <span className="ml-3 hidden text-xs font-medium text-slate-500 sm:block">
-        {users.length} online
+        {deduped.length} online
       </span>
     </div>
   );

@@ -5,50 +5,102 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Users } from "lucide-react";
 import { languageAccent } from "@/lib/types";
-
-/**
- * JoinGate — confirmation step for a valid room link before entering.
- * One click: the server (auto-provisioning a session if needed) records
- * membership, then the page refreshes into the editor.
- */
+import { apiFetch, ensureClientSession, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
+import AmbientBackground from "@/components/visual/AmbientBackground";
 
 interface JoinGateProps {
   code: string;
   title: string;
   language: string;
+  onJoined?: () => void;
 }
 
-export default function JoinGate({ code, title, language }: JoinGateProps) {
+export default function JoinGate({ code, title, language, onJoined }: JoinGateProps) {
   const router = useRouter();
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const join = useCallback(async () => {
+    console.log("[JOIN] JOIN_CLICK", { code });
     setJoining(true);
     setError(null);
+
     try {
-      const res = await fetch(
-        `/api/rooms/${encodeURIComponent(code)}/join`,
-        { method: "POST", credentials: "same-origin" },
-      );
-      const data = (await res.json()) as { error?: string };
+      await ensureClientSession();
+      const beforeToken = getStoredToken();
+      console.log("[JOIN] BEFORE_JOIN_TOKEN_PRESENT", { present: !!beforeToken });
+      console.log("[JOIN] JOIN_TOKEN_PRESENT", { present: !!beforeToken });
+      console.log("[JOIN] JOIN_REQUEST_START", { url: `/api/rooms/${code}/join` });
+      const res = await apiFetch(`/api/rooms/${encodeURIComponent(code)}/join`, {
+        method: "POST",
+      });
+      console.log("[JOIN] JOIN_RESPONSE", { status: res.status, ok: res.ok });
+
+      const data = (await res.json()) as { error?: string; sessionToken?: string; room?: any };
+      console.log("[JOIN] JOIN_RESPONSE_BODY", { ok: res.ok, error: data.error, hasRoom: !!data.room, hasToken: !!data.sessionToken });
+      handleSessionResponse(data);
+
+      const afterToken = getStoredToken();
+      console.log("[JOIN] AFTER_JOIN_TOKEN_PRESENT", { present: !!afterToken });
+
       if (!res.ok) {
         throw new Error(data.error ?? "Unable to join room.");
       }
-      router.refresh(); // re-run the server gate: now a member
+
+      console.log("[JOIN] JOIN_SUCCESS", { code });
+
+      // Verify we can now load the room with bearer/cookie
+      try {
+        console.log("[JOIN] NEXT_REQUEST_AFTER_JOIN", { url: `/api/rooms/${code}` });
+        const roomRes = await apiFetch(`/api/rooms/${encodeURIComponent(code)}`);
+        console.log("[JOIN] NEXT_RESPONSE", { status: roomRes.status, ok: roomRes.ok });
+        const roomData = await roomRes.json().catch(() => ({}));
+        console.log("[JOIN] NEXT_RESPONSE_BODY", { hasRoom: !!(roomData as any).room, error: (roomData as any).error });
+        handleSessionResponse(roomData);
+
+        if (!roomRes.ok) {
+          throw new Error((roomData as any).error ?? `Could not load editor after join: ${roomRes.status}`);
+        }
+      } catch (e) {
+        console.error("[JOIN] ROOM_FETCH_AFTER_JOIN_FAILED", e);
+        setError(e instanceof Error ? e.message : "Joined room, but could not load the editor.");
+        setJoining(false);
+        return;
+      }
+
+      console.log("[JOIN] JOIN_NAVIGATE_START", { code });
+      try {
+        if (onJoined) {
+          onJoined();
+          console.log("[JOIN] JOIN_NAVIGATE_SUCCESS via onJoined callback");
+        } else {
+          // Fallback: push to same room route which will re-mount RoomClient and fetch with bearer
+          router.push(`/room/${code}`);
+          console.log("[JOIN] JOIN_NAVIGATE_SUCCESS via router.push");
+        }
+        // Ensure loading state resets
+        setJoining(false);
+      } catch (navErr) {
+        console.error("[JOIN] JOIN_NAVIGATE_ERROR", navErr);
+        setError("Joined room, but navigation failed. Please refresh.");
+        setJoining(false);
+      }
     } catch (err) {
+      console.error("[JOIN] JOIN_ERROR", err);
       setError(err instanceof Error ? err.message : "Unable to join room.");
       setJoining(false);
     }
-  }, [code, router]);
+  }, [code, router, onJoined]);
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-[#07090f] px-6">
-      <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#10141f] p-8 text-center shadow-2xl shadow-black/50">
-        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-violet-500/15 text-violet-300">
+    <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-[#050814] px-6 text-slate-100">
+      <AmbientBackground variant="home" />
+      <div className="pointer-events-none absolute inset-0 bg-[#050814]/55" aria-hidden />
+      <div className="premium-panel premium-border relative z-10 w-full max-w-sm rounded-3xl p-8 text-center">
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-200 ring-1 ring-cyan-200/20">
           <Users className="h-5 w-5" />
         </div>
-        <p className="font-mono text-xs tracking-[0.3em] text-violet-300">
+        <p className="font-mono text-xs tracking-[0.3em] text-cyan-200">
           {code}
         </p>
         <h1 className="mt-3 text-xl font-bold tracking-tight text-slate-50">
@@ -77,7 +129,7 @@ export default function JoinGate({ code, title, language }: JoinGateProps) {
           type="button"
           disabled={joining}
           onClick={() => void join()}
-          className="mt-7 flex w-full items-center justify-center gap-2 rounded-lg bg-violet-500 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-400 active:scale-[0.98] disabled:opacity-60"
+          className="mt-7 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-300 py-2.5 text-sm font-bold text-[#031018] transition hover:bg-cyan-200 active:scale-[0.98] disabled:opacity-60"
         >
           {joining && <Loader2 className="h-4 w-4 animate-spin" />}
           {joining ? "Joining…" : "Join room"}

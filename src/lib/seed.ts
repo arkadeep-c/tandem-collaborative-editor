@@ -1,4 +1,4 @@
-import { db } from "@/db";
+import { db, isUsingLocalDb } from "@/db";
 import { documents, roomMembers, rooms, users } from "@/db/schema";
 
 /**
@@ -43,9 +43,9 @@ room.flush(debounce(5_000)); // trailing-edge write to Postgres
 
 ## Languages
 
-Switch the room language in the header — JavaScript, TypeScript, Python,
-C, C++, Java, Markdown, JSON and more. The choice syncs to every
-collaborator and persists with the document.
+Switch the room language in the header — C, C++, Java, Python, JavaScript,
+TypeScript, Bash / Shell, Markdown, HTML, CSS, and JSON. The choice syncs
+to every collaborator and persists with the document without replacing content.
 
 *This room is public; rooms you create are private to their code holder.*
 `;
@@ -54,45 +54,73 @@ let seedPromise: Promise<void> | null = null;
 
 export async function ensureSeed(): Promise<void> {
   seedPromise ??= (async () => {
-    const [existing] = await db
+    const [existing] = await (db as any)
       .select({ id: rooms.id })
       .from(rooms)
       .limit(1);
     if (existing) return;
 
-    await db
-      .insert(users)
-      .values({ id: SYSTEM_USER_ID, name: "Tandem Bot", color: "#8b5cf6" })
-      .onConflictDoNothing();
+    if (isUsingLocalDb()) {
+      (db as any).insert(users).values({ id: SYSTEM_USER_ID, name: "Tandem Bot", color: "#14b8a6" }).onConflictDoNothing().run();
+    } else {
+      await (db as any).insert(users).values({ id: SYSTEM_USER_ID, name: "Tandem Bot", color: "#14b8a6" }).onConflictDoNothing();
+    }
 
-    const [doc] = await db
-      .insert(documents)
-      .values({
-        id: "seed-doc-demo",
-        title: "Welcome to Tandem",
-        language: "markdown",
-        content: DEMO_MARKDOWN,
-      })
-      .returning();
+    let doc: any;
+    if (isUsingLocalDb()) {
+      doc = (db as any)
+        .insert(documents)
+        .values({
+          id: "seed-doc-demo",
+          title: "Welcome to Tandem",
+          language: "markdown",
+          content: DEMO_MARKDOWN,
+        })
+        .returning()
+        .get();
+    } else {
+      const [d] = await (db as any)
+        .insert(documents)
+        .values({
+          id: "seed-doc-demo",
+          title: "Welcome to Tandem",
+          language: "markdown",
+          content: DEMO_MARKDOWN,
+        })
+        .returning();
+      doc = d;
+    }
 
-    const [room] = await db
-      .insert(rooms)
-      .values({
-        id: "seed-room-demo",
-        code: DEMO_ROOM_CODE,
-        ownerId: SYSTEM_USER_ID,
-        documentId: doc!.id,
-      })
-      .returning();
+    let room: any;
+    if (isUsingLocalDb()) {
+      room = (db as any)
+        .insert(rooms)
+        .values({
+          id: "seed-room-demo",
+          code: DEMO_ROOM_CODE,
+          ownerId: SYSTEM_USER_ID,
+          documentId: doc!.id,
+        })
+        .returning()
+        .get();
+    } else {
+      const [r] = await (db as any)
+        .insert(rooms)
+        .values({
+          id: "seed-room-demo",
+          code: DEMO_ROOM_CODE,
+          ownerId: SYSTEM_USER_ID,
+          documentId: doc!.id,
+        })
+        .returning();
+      room = r;
+    }
 
-    await db
-      .insert(roomMembers)
-      .values({
-        roomId: room!.id,
-        userId: SYSTEM_USER_ID,
-        role: "owner",
-      })
-      .onConflictDoNothing();
+    if (isUsingLocalDb()) {
+      (db as any).insert(roomMembers).values({ roomId: room!.id, userId: SYSTEM_USER_ID, role: "owner" }).onConflictDoNothing().run();
+    } else {
+      await (db as any).insert(roomMembers).values({ roomId: room!.id, userId: SYSTEM_USER_ID, role: "owner" }).onConflictDoNothing();
+    }
   })();
 
   return seedPromise;

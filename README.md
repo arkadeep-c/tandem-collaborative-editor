@@ -1,240 +1,348 @@
-# Tandem — Real-Time Collaborative Code & Markdown Editor
+# Tandem — Collaborative Code & Markdown Rooms
 
-Create a private room, share its 6-character code (or invite link), and
-write code or markdown together in real time. Remote carets, selections,
-presence, and synchronized language switching — with server-managed
-anonymous sessions and membership-gated collaboration throughout.
+Tandem is a single-document collaborative coding environment. Create a private
+room, choose a language, share the room code or invite link, edit together in
+real time, run supported code in an isolated runtime, inspect Problems and
+Output, and return to the same room later.
 
-**Supported languages:** JavaScript · TypeScript · Python · C · C++ ·
-Java · Markdown · JSON (plus Go, Rust, SQL, HTML, CSS, YAML).
+This repository is intentionally a small, understandable full-stack app: one
+Next.js application, one realtime collaboration engine, one room-code workflow.
+There are no accounts, OAuth flows, multi-file projects, Git integrations, or
+AI assistants in this version.
 
 ---
 
-## 1 · Key features
+## Supported languages
 
-- **Rooms with human-friendly codes** — `X7K2PQ` style, server-minted,
-  case-insensitive, `UNIQUE` in Postgres, unambiguous alphabet (no `0/O`, `1/I/L`).
-- **Share by code or link** — `https://<host>/room/<CODE>`; invitees get a
-  join-confirmation gate, then land directly in the editor.
-- **Server-managed anonymous identity** — no accounts. The server creates
-  the user, signs an HMAC session cookie (`HttpOnly`, `SameSite=Lax`,
-  `Secure` in production), and every privileged request derives identity
-  from it. Display name/colors are cosmetic and server-validated.
-- **Membership authorization** — edits, presence, streams, and metadata
-  all re-verify *valid session → room exists → caller is a member*
-  (owner role additionally required for title/language).
-- **Correct real-time sync** — custom operational transformation
-  (insert/delete position transforms), one serialized apply order per
-  room, monotonic revisions, author-echo ACKs, `409 → snapshot` resync.
-- **Debounced persistence** — rooms stay hot in cache; a 5s trailing-edge
-  flusher writes to PostgreSQL (never per keystroke).
-- **Presence** — server-verified names/colors, live cursors + selection
-  highlights, typing indicators, disconnect cleanup, idle GC.
-- **Rate limiting + payload validation** — sliding-window limits on room
-  creation/joins/edits/presence; op batches structurally validated and
-  bounds-checked at apply time.
+### Executable V1 languages
 
-## 2 · Architecture
+The Run button is available for:
 
-One canonical implementation: Next.js (App Router, TypeScript).
-There is no alternate backend, no second realtime transport — the realtime
-plane is a server-streamed channel plus REST uploads, all under one process.
+- C (`gcc`)
+- C++ (`g++`)
+- Java (`javac` → `java Main`)
+- Python (`python3`)
+- JavaScript (`node`)
+- TypeScript (server-side TypeScript transpile, then `node`)
+- Bash / Shell (`bash`)
 
+Execution availability depends on a configured isolated execution backend. If no
+safe backend exists, Tandem fails closed and returns an `unavailable` result
+instead of running user code directly on the app host.
+
+### Tooling / non-executable modes
+
+- Markdown — editor + safe Markdown preview via `react-markdown` and `remark-gfm`
+- HTML — limited sandboxed iframe preview with scripts disabled
+- CSS — limited sandboxed iframe sample preview with scripts disabled
+- JSON — explicit **Validate** and **Format** actions with diagnostics
+
+Unsupported languages such as Go, Rust, SQL, YAML, Kotlin, and PHP are not
+advertised in V1.
+
+---
+
+## Product loop
+
+1. Create a room.
+2. Choose a language.
+3. Start with either a **Blank Editor** or an explicit **Starter Template**.
+4. Edit freely in Monaco.
+5. Run supported languages with optional stdin.
+6. Inspect stdout, stderr, exit code, duration, and diagnostics.
+7. Click Problems to jump back to the relevant editor line.
+8. Collaborate in real time with presence, cursors, and selections.
+9. Save automatically and return later from **Your Rooms**.
+10. Rename, leave, delete, copy room code, or copy invite link.
+
+Changing the room language never replaces existing document content. Starter
+content is only inserted on explicit create-time selection or by the explicit
+Starter action in the editor.
+
+---
+
+## Architecture
+
+One canonical implementation: Next.js App Router + TypeScript.
+
+```text
+Browser
+  ├─ Monaco editor + OT client FSM
+  ├─ REST uploads for operations/presence/execution
+  └─ event-stream downlink for realtime snapshots/events
+        ↓
+Next.js API routes
+  ├─ signed session resolution
+  ├─ room membership / owner authorization
+  ├─ validation + rate limits
+  ├─ execution API
+  └─ collaboration stream
+        ↓
+Room engine
+  ├─ one hot Room object per active room
+  ├─ serialized per-room operation order
+  ├─ OT-lite insert/delete transforms
+  ├─ presence registry
+  └─ debounced persistence
+        ↓
+PostgreSQL durable store
+Redis hot document cache when configured
+SQLite + memory cache only for explicit preview/local fallback
 ```
-Browser (Monaco, OT client FSM)
-   │  REST uploads · event-stream downlink (one transport)
-   ▼
-Next.js API layer ── session cookie verify ── membership check
-   │                                    │            │
-   │                                    │            └── room metadata (owner only)
-   │                                    └── presence / caret fan-out
-   ▼
-Collaboration engine (per-room serializer, OT transforms, presence registry)
-   │
-   ├── Cache layer (Redis when REDIS_URL set · in-memory fallback)
-   ▼
-PostgreSQL ── users · sessions · rooms · room_members · documents
+
+The realtime ordering model is intentionally single-process. It does not claim
+fully distributed horizontal consistency. Run one application instance for the
+realtime plane unless you redesign the collaboration layer.
+
+---
+
+## Sessions and authorization
+
+Tandem uses anonymous server-managed sessions:
+
+- The server creates the user and session.
+- The primary credential is a signed HttpOnly cookie.
+- Preview/cookie-blocked contexts can use a signed bearer fallback managed by
+  the existing `apiFetch` client helper.
+- Client-provided `userId`, `ownerId`, or room roles are never authoritative.
+
+Every privileged route verifies:
+
+1. valid session
+2. valid room code
+3. room exists
+4. caller is a member
+5. owner role for owner-only actions
+
+Room-scoped edit, stream, presence, metadata, execution, leave, and delete routes
+all pass through server-side authorization.
+
+---
+
+## Rooms and persistence
+
+- Room codes are server-minted, human-friendly, and unique.
+- Room membership prevents duplicate joins.
+- Room metadata and documents are associated through the database schema.
+- Document edits are flushed with a 5 second debounce.
+- The UI reports connection and save state from the collaboration stream.
+- Leaving a room removes live presence and membership. If an owner leaves while
+  other members remain, ownership transfers to the oldest remaining member.
+- Deleting a room is owner-only, confirmation-gated in the UI, and deletes the
+  room, memberships, and document.
+
+Production persistence is PostgreSQL. Preview/local fallback is SQLite only when
+explicitly enabled.
+
+---
+
+## Execution architecture
+
+The execution path is:
+
+```text
+Browser Run Code
+  → POST /api/rooms/:code/execute
+  → session + membership check
+  → source/stdin/language validation
+  → execution backend abstraction
+  → isolated Linux runtime
+  → structured ExecutionResult
+  → Output + Problems panels
 ```
 
-### Room flow
+The result shape is:
 
+```json
+{
+  "status": "success",
+  "stdout": "Hello\n",
+  "stderr": "",
+  "exitCode": 0,
+  "duration": 42,
+  "problems": []
+}
 ```
-Create Room → server validates session → mint unique code (retry on collision)
-   → insert document + room (transaction) → creator = owner-member
-   → /room/<CODE>
-Share: copy code or invite link
-Join: normalize code → validate format → room exists?
-   yes → insert membership (idempotent, ON CONFLICT DO NOTHING)
-       → verify session → open realtime stream → snapshot + roster
-Collaborate: ops validated → transformed vs concurrent history →
-   applied in room order → broadcast → 5s debounced flush to Postgres
-```
 
-### Why single-process ordering (honest scope)
+Statuses:
 
-Document mutation for each room runs through an in-process promise
-serializer, so op application is a *single total order per room by
-construction* — no distributed locks, no TTL races, nothing claimed that
-isn't proven. Deployments are expected to run **one application instance**
-(co-locating the realtime plane and the engine). Horizontal scale-out is
-deliberately out of scope and documented under *Future improvements*.
+- `success`
+- `compile_error`
+- `runtime_error`
+- `timeout`
+- `output_limit`
+- `memory_limit`
+- `execution_error`
+- `unavailable`
 
-## 3 · Tech stack
+### Security model
 
-| Layer | Choice |
-| --- | --- |
-| Frontend | Next.js App Router, React 19, TypeScript, Tailwind v4, Monaco |
-| Realtime | Server-streamed events + REST uploads (single transport) |
-| Sync | Custom OT-lite (insert/delete position transforms), client FSM |
-| Database | PostgreSQL via Drizzle ORM (`drizzle-kit push` for schema) |
-| Cache | Redis (`ioredis`) when `REDIS_URL` is set; transparent in-memory fallback |
-| Sessions | HMAC-signed HttpOnly cookie + server-side session rows |
-| Runtime | Node 20 · Docker Compose (app + postgres + redis) |
+Tandem never uses `eval`, `new Function`, or `child_process.exec(userCode)`.
+Source code is written to a disposable temp directory and executed by a sandbox
+backend with:
 
-## 4 · Roles of the data stores
+- sanitized environment
+- no application secrets
+- no database or Redis credentials
+- no repository mount
+- no network namespace in the Linux namespace backend
+- Docker `--network none` in the Docker backend
+- CPU timeout
+- output limit
+- stdin/source size limits
+- process/file limits
+- cleanup after execution
 
-- **PostgreSQL (durable truth):** `users`, `sessions`, `rooms`
-  (`code UNIQUE`), `room_members` (composite PK → idempotent joins),
-  `documents` (title/content/language/revision/timestamps). Written by the
-  debounced flusher and lifecycle transactions only.
-- **Redis (realtime/cache only):** rolling-TTL check-points of hot room
-  buffers during editing (`doc:<code>`) so cache reads are O(1) and Postgres
-  stays cold. Not a system of record; when `REDIS_URL` is unset the same
-  code paths run on an in-memory cache. `/api/health` reports the active
-  mode (`"cache": "redis" | "memory"`).
-
-## 5 · Room codes
-
-- 6 characters, alphabet `ABCDEFGHJKMNPQRSTUVWXYZ23456789`
-- generated **server-side only** (`crypto.randomInt`), stored `UNIQUE`
-- normalized on input (trim, uppercase, separators stripped)
-- validated on every request; unknown code → a clean *"Room not found."*
-- collision-safe creation: insert retry loop with the UNIQUE constraint as
-  the final arbiter (32⁶ ≈ 1.07B codespace)
-
-## 6 · Security model
-
-| Threat | Mitigation |
-| --- | --- |
-| Identity spoofing | Identity never comes from the client; server issues user + signed cookie; HMAC verified on every request |
-| Cookie theft/XSS read | `HttpOnly`, `SameSite=Lax`, `Secure` in production, 30-day sliding expiry, revocable session rows |
-| Unauthorized room access | Membership row verified before stream/edits/presence/meta, server-side, on every request |
-| Connection hijack | Connection ids are server-minted (`c_<18 hex>`) and must map to the caller's user in the live room registry |
-| Owner escalation | Owner role comes from the DB membership row only; `PATCH` meta is owner-gated server-side |
-| Malformed ops | Structural validation (types, ranges, sizes) + post-transform bounds checks against the live buffer |
-| Stale/forged revisions | Base revisions outside the OT window (or above the tip) → `409` + snapshot resync |
-| Abuse | Sliding-window rate limits (room creation, joins, edits, presence, meta) |
-| Injection | Parameterized Drizzle queries; markdown preview rendered by react-markdown (no `dangerouslySetInnerHTML`) |
-| Secret handling | `SESSION_SECRET`/`DATABASE_URL`/`REDIS_URL` from env only (`.env` gitignored); no hardcoded secrets — missing secret falls back to an ephemeral per-process key with a loud warning |
-| Error hygiene | Short user-facing messages; stack traces stay in server logs |
-
-## 7 · Revision & ordering model
-
-- Every op batch carries a `baseRevision`; the room transforms it over the
-  retained history ring (256 ops) and applies in one serialized order.
-- Revisions are monotonic per room and persisted with the buffer, so a
-  cold server restart still validates stale clients.
-- The author's **echo frame on the ordered stream** is the client FSM's
-  ack — outstanding batches can't deadlock, even when a batch is swallowed
-  whole by a concurrent wider delete.
-- Clients outside the transform window resync from a snapshot; reconnects
-  replay `init` (full buffer + roster) — refreshes are fully recoverable.
-
-## 8 · Running locally
+Production should use a dedicated Docker image configured with:
 
 ```bash
-# prerequisites: Node 20+, PostgreSQL running (Docker works too)
-cp .env.example .env          # then set SESSION_SECRET
-docker compose up -d postgres redis   # or use your own instances
+docker build -f docker/executor.Dockerfile -t tandem-executor:local .
+```
+
+```env
+TANDEM_EXECUTION_BACKEND=docker
+TANDEM_EXECUTION_IMAGE=tandem-executor:local
+```
+
+The Docker image must contain `gcc`, `g++`, `python3`, `node`, and `bash`.
+Tandem runs containers with no network, memory/pid/CPU limits, read-only root,
+and a disposable workspace mount.
+
+For local Linux/Arena preview, Tandem can use the Linux namespace backend when
+preview/local flags are set. This is suitable for development and testing but is
+not advertised as a hardened multi-tenant production sandbox. If no backend is
+available, execution fails closed with a clean `unavailable` message.
+
+---
+
+## Problems and diagnostics
+
+Execution output is not just raw compiler text. Tandem parses common diagnostics
+where practical:
+
+- C/C++: `file:line:column: error|warning: message`
+- Java: `Main.java:line: error|warning: message` plus caret columns when available
+- Python: traceback file/line and final exception
+- JavaScript/TypeScript: stack locations and common error classes
+- Bash: `script.sh: line N: message`
+- JSON: syntax position mapped to line/column in the editor
+
+Problems are shown with severity, line/column, message, Monaco markers, and
+click-to-jump behavior.
+
+---
+
+## Local setup
+
+```bash
 npm install
-npx drizzle-kit push          # create tables
-npm run dev                   # http://localhost:3000
 ```
 
-Seeded on first boot: a public demo room with code **TANDEM**.
-
-## 9 · Running with Docker (everything in one command)
+For the Arena/local fallback stack:
 
 ```bash
-cp .env.example .env          # set SESSION_SECRET inside
-docker compose up --build     # → http://localhost:3000
+APP_ENV=preview \
+USE_LOCAL_DEV_DB=true \
+SESSION_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))") \
+npm run dev
 ```
 
-Compose starts **postgres** + **redis** + **app** (health-gated). The app
-container applies the schema (`drizzle-kit push`) on boot and serves Next
-in production mode. That's the entire topology — no other services.
+This uses:
 
-## 10 · Environment variables
+- SQLite file database at `./data/tandem.db`
+- in-memory realtime document cache when Redis is not configured
+- Linux namespace execution backend on Linux when available
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `DATABASE_URL` | ✔ | PostgreSQL connection string |
-| `SESSION_SECRET` | ✔ prod | HMAC key for session cookies (≥16 chars). Unset → ephemeral per-process secret (sessions reset on restart) |
-| `REDIS_URL` | optional | Enables Redis room-buffer caching (else in-memory) |
-| `APP_URL` | optional | Canonical public origin, used for diagnostics |
+For PostgreSQL/Redis development, provide `DATABASE_URL` and optionally
+`REDIS_URL`, then run the app normally.
 
-## 11 · API surface
+### Windows local execution setup
 
-| Method | Path | Auth | Purpose |
-| --- | --- | --- | --- |
-| `GET` | `/api/health` | public | liveness + cache mode |
-| `GET` | `/api/session` | public* | ensure/return the anonymous session *(issues one if absent)* |
-| `PATCH` | `/api/session` | session | update own display name/color |
-| `POST` | `/api/rooms` | session | create room (server-minted code) |
-| `GET` | `/api/rooms/mine` | session | list caller's rooms |
-| `POST` | `/api/rooms/:code/join` | session | idempotent membership grant |
-| `POST` | `/api/rooms/:code/leave` | member | drop presence (membership kept) |
-| `GET` | `/api/rooms/:code` | member | room info |
-| `PATCH` | `/api/rooms/:code` | **owner** | title/language (broadcast live) |
-| `GET` | `/api/rooms/:code/stream` | member | realtime channel |
-| `POST` | `/api/rooms/:code/operations` | member + verified connection | op upload |
-| `POST` | `/api/rooms/:code/presence` | member + verified connection | caret/selection/typing |
+Do not install compilers directly into the Windows host just to run Tandem code.
+Use Docker Desktop with Linux containers:
 
-## 12 · Try two-user collaboration
+```powershell
+# from the repository root
+docker version
+docker build -f docker/executor.Dockerfile -t tandem-executor:local .
 
-1. **Browser A:** open `/` → *Create Room* → copy the room code or invite link.
-2. **Browser B** (or incognito): open the app → *Join Room* → enter the
-   code (lowercase and stray spaces are fine) → *Join*.
-3. Type in A — B sees it live; type in B — A sees it live. Watch carets,
-   selections, and the avatar stack. Owner switches the language in the
-   header; everyone follows (C/C++/Java/Python/TS/JS/MD/JSON …).
-4. Refresh B — it rejoins instantly (membership persists) and catches up
-   from the authoritative snapshot.
-5. Try a bogus code (`XXXXXX`) → clean *"Room not found."* screen.
+$env:TANDEM_EXECUTION_BACKEND = "docker"
+$env:TANDEM_EXECUTION_IMAGE = "tandem-executor:local"
+$env:APP_ENV = "preview"
+$env:USE_LOCAL_DEV_DB = "true"
+$env:SESSION_SECRET = "replace-with-a-long-random-dev-secret"
+npm run dev
+```
 
-## 13 · Tests
+Then open `/api/execution`. The response should show every executable language
+with `ready: true`. If Docker is not available, execution stays unavailable and
+fails closed; the editor, collaboration, Markdown, HTML/CSS preview, and JSON
+tooling still work.
+
+---
+
+## Standard commands
 
 ```bash
-npx vitest run
+npm run dev
+npm test
+npm run lint
+npm run typecheck
+APP_ENV=preview USE_LOCAL_DEV_DB=true npm run build
 ```
 
-41 unit tests cover: room-code generation/normalization/uniqueness,
-session-cookie signing + tamper rejection, payload/operation validation &
-bounds checks, OT transform convergence, and the sliding-window rate
-limiter. Route-level behavior (membership gates, owner-only meta, resync)
-is exercised in the manual acceptance flow above.
+`npm test` runs `vitest run`.
 
-## 14 · Known limitations
+---
 
-- **Single-process collaboration**: the engine intentionally serializes
-  room order in-process; run one app instance. (Redis use is strictly
-  cache/check-pointing.)
-- OT-lite supports insert/delete only — no rich-text formatting ops; a
-  CRDT codec (e.g. Yjs) could replace the op layer behind the same
-  room/sync infrastructure.
-- Remote edits share Monaco's undo stack (per-author undo rings are a
-  known refinement).
-- Anonymous sessions are long-lived but not forever; expired sessions
-  mint a fresh anonymous user (rooms you created remain in the DB — share
-  the code again to rejoin).
-- No code execution: this is an editor/IDE surface; untrusted code is
-  never executed server-side.
+## Environment variables
 
-## 15 · Future improvements
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string for production |
+| `REDIS_URL` | Redis document cache URL; memory fallback only in preview/dev |
+| `SESSION_SECRET` | Required in production/preview for signed sessions |
+| `SESSION_COOKIE_SECURE` | Override Secure cookie flag |
+| `SESSION_COOKIE_SAMESITE` | Override SameSite (`none`, `lax`, `strict`) |
+| `SESSION_COOKIE_PARTITIONED` | Enable Partitioned cookies for embedded previews |
+| `APP_ENV=preview` | Enables preview behavior and SQLite fallback |
+| `USE_LOCAL_DEV_DB=true` | Enables SQLite fallback explicitly |
+| `SQLITE_DB_PATH` | Optional SQLite path, default `./data/tandem.db` |
+| `TANDEM_EXECUTION_BACKEND` | `docker`, `linux-namespace`, `disabled`, or `auto` |
+| `TANDEM_EXECUTION_IMAGE` | Docker image for production execution sandbox |
+| `TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR=true` | Explicit local opt-in for namespace backend |
 
-- True multi-instance scaling: routing-by-room (sticky sessions) or moving
-  the op serializer+history into a dedicated writer service — designed
-  *before* claiming it.
-- CRDT document codec; per-author undo rings.
-- Optional OAuth identities layered onto the existing session rows.
-- Room admin controls for owners (kick/member list view).
+Do not commit real secrets. Do not silently use SQLite/in-memory cache in
+production.
+
+---
+
+## Testing notes
+
+The automated suite covers room code validation, input validation, OT transforms,
+session cookies, rate limits, language registry alignment, execution diagnostic
+parsers, and fail-closed execution behavior.
+
+Manual browser acceptance should verify:
+
+- editor typing/deleting/pasting/undo/redo
+- create/join/rename/leave/delete
+- two-browser collaboration and presence
+- save/refresh persistence
+- C, C++, Java, Python, JavaScript, TypeScript, Bash execution with stdout/stderr
+- compile/runtime/timeout/output-limit diagnostics
+- Markdown preview, HTML/CSS safe preview, JSON validate/format
+- copy code/link and download
+- responsive layout and keyboard shortcuts
+
+---
+
+## Known limitations
+
+- Tandem is a single-document room editor, not a multi-file IDE.
+- The realtime engine is single-process and not a distributed OT service.
+- SQL execution is not supported.
+- Go/Rust/YAML are not V1 languages.
+- HTML/CSS preview is deliberately limited and sandboxed; scripts are disabled.
+- The Linux namespace execution backend is for local/preview use. Use a dedicated
+  Docker sandbox image for production.

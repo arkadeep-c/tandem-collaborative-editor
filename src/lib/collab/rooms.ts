@@ -1,13 +1,15 @@
 import { randomBytes } from "crypto";
 import { eq } from "drizzle-orm";
-import { db } from "@/db";
+import { db, ensureRoomTemplateModeColumn, isUsingLocalDb } from "@/db";
 import { documents, rooms } from "@/db/schema";
 import { currentStore, resolveDocStore } from "@/lib/collab/store";
-import { applyOp, transformOp } from "@/lib/ot";
+import { applyOp, rebaseSequentialOps } from "@/lib/ot";
 import { opWithinBounds } from "@/lib/validation";
+import { normalizeRoomTemplateMode, type RoomTemplateMode } from "@/lib/roomTemplates";
 import type {
   ClientUser,
   PresenceState,
+  RoomMemberInfo,
   ServerEvent,
   TextOp,
 } from "@/lib/types";
@@ -48,6 +50,8 @@ export interface RoomRecord {
   documentId: string;
   title: string;
   language: string;
+  locked: boolean;
+  templateMode?: string | null;
 }
 
 class Room {
@@ -62,10 +66,15 @@ class Room {
   private dirty = false;
   private loaded = false;
 
-  meta: { title: string; language: string };
+  meta: { title: string; language: string; locked: boolean; templateMode: RoomTemplateMode };
 
   constructor(readonly record: RoomRecord) {
-    this.meta = { title: record.title, language: record.language };
+    this.meta = {
+      title: record.title,
+      language: record.language,
+      locked: record.locked,
+      templateMode: normalizeRoomTemplateMode(record.templateMode),
+    };
   }
 
   get documentId(): string {
@@ -167,6 +176,33 @@ class Room {
     return true;
   }
 
+  notifyMemberJoined(user: ClientUser, members: RoomMemberInfo[]): void {
+    this.dispatchExceptUser({ type: "member_join", user, members }, user.id);
+  }
+
+  notifyMemberLeft(user: ClientUser, members: RoomMemberInfo[]): void {
+    this.dispatchExceptUser({ type: "member_leave", user, members }, user.id);
+  }
+
+  notifyMemberKicked(user: ClientUser, members: RoomMemberInfo[]): void {
+    this.sendToUser(user.id, {
+      type: "access_revoked",
+      reason: "kicked",
+      message: "You were removed from this coding room by the room owner.",
+    });
+    this.dispatchExceptUser({ type: "member_kick", user, members }, user.id);
+    this.leaveUser(user.id, false);
+  }
+
+  notifyMembersChanged(members: RoomMemberInfo[]): void {
+    this.broadcast({ type: "members", members });
+  }
+
+  setLocked(locked: boolean): void {
+    this.meta.locked = locked;
+    this.broadcast({ type: "room_lock", locked });
+  }
+
   /* ---------------- operations ---------------- */
 
   async applyOperations(
@@ -183,15 +219,17 @@ class Room {
         return { stale: true as const };
       }
       const base = this.revision - this.opLog.length;
-      const missed = this.opLog.slice(baseRevision - base);
+      // Snapshot only the operations that existed after the client's base
+      // revision before this submitted batch began. OperationBatch.ops is an
+      // ordered sequential script, so later entries already include earlier
+      // same-batch edits and must not be transformed against them.
+      const missed = this.opLog
+        .slice(baseRevision - base)
+        .map((entry) => entry.op);
       const applied: TextOp[] = [];
       let dropped = 0;
 
-      for (const original of ops) {
-        let op: TextOp | null = original;
-        for (const past of missed) op = op ? transformOp(op, past.op) : null;
-        for (const done of applied) op = op ? transformOp(op, done) : null;
-        if (!op) continue;
+      for (const op of rebaseSequentialOps(ops, missed)) {
         // Post-transform bounds check — untrusted offsets can never
         // escape the live buffer; the op is dropped, order is preserved.
         if (!opWithinBounds(op, this.content.length)) {
@@ -203,7 +241,6 @@ class Room {
         const logged: LoggedOp = { revision: this.revision, op };
         this.opLog.push(logged);
         applied.push(op);
-        missed.push(logged);
       }
       while (this.opLog.length > OP_LOG_LIMIT) this.opLog.shift();
 
@@ -242,18 +279,28 @@ class Room {
     await this.enqueue(async () => {
       if (patch.title !== undefined) this.meta.title = patch.title;
       if (patch.language !== undefined) this.meta.language = patch.language;
-      await db
-        .update(documents)
-        .set({
-          ...(patch.title !== undefined ? { title: patch.title } : {}),
-          ...(patch.language !== undefined ? { language: patch.language } : {}),
-          updatedAt: new Date(),
-        })
-        .where(eq(documents.id, this.record.documentId));
-      await db
-        .update(rooms)
-        .set({ updatedAt: new Date() })
-        .where(eq(rooms.id, this.record.id));
+      if (isUsingLocalDb()) {
+        (db as any)
+          .update(documents)
+          .set({
+            ...(patch.title !== undefined ? { title: patch.title } : {}),
+            ...(patch.language !== undefined ? { language: patch.language } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(documents.id, this.record.documentId))
+          .run();
+        (db as any).update(rooms).set({ updatedAt: new Date() }).where(eq(rooms.id, this.record.id)).run();
+      } else {
+        await (db as any)
+          .update(documents)
+          .set({
+            ...(patch.title !== undefined ? { title: patch.title } : {}),
+            ...(patch.language !== undefined ? { language: patch.language } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(documents.id, this.record.documentId));
+        await (db as any).update(rooms).set({ updatedAt: new Date() }).where(eq(rooms.id, this.record.id));
+      }
     });
     this.broadcast({ type: "meta", ...patch });
   }
@@ -276,14 +323,26 @@ class Room {
     try {
       const store = await resolveDocStore();
       await store.set(this.record.code, snapshot);
-      await db
-        .update(documents)
-        .set({
-          content: snapshot.content,
-          revision: snapshot.revision,
-          updatedAt: new Date(),
-        })
-        .where(eq(documents.id, this.record.documentId));
+      if (isUsingLocalDb()) {
+        (db as any)
+          .update(documents)
+          .set({
+            content: snapshot.content,
+            revision: snapshot.revision,
+            updatedAt: new Date(),
+          })
+          .where(eq(documents.id, this.record.documentId))
+          .run();
+      } else {
+        await (db as any)
+          .update(documents)
+          .set({
+            content: snapshot.content,
+            revision: snapshot.revision,
+            updatedAt: new Date(),
+          })
+          .where(eq(documents.id, this.record.documentId));
+      }
       this.broadcast({
         type: "saved",
         revision: snapshot.revision,
@@ -356,9 +415,35 @@ class Room {
     }
   }
 
+  private sendToUser(userId: string, event: ServerEvent): void {
+    for (const [connectionId, bucket] of this.subscribers) {
+      if (this.users.get(connectionId)?.user.id !== userId) continue;
+      for (const fn of bucket) {
+        try {
+          fn(event);
+        } catch {
+          /* reaped by its own disconnect handler */
+        }
+      }
+    }
+  }
+
   private dispatch(event: ServerEvent, exceptConnectionId: string | null): void {
     for (const [connectionId, bucket] of this.subscribers) {
       if (connectionId === exceptConnectionId) continue;
+      for (const fn of bucket) {
+        try {
+          fn(event);
+        } catch {
+          /* a dead subscriber is reaped by its own disconnect handler */
+        }
+      }
+    }
+  }
+
+  private dispatchExceptUser(event: ServerEvent, exceptUserId: string): void {
+    for (const [connectionId, bucket] of this.subscribers) {
+      if (this.users.get(connectionId)?.user.id === exceptUserId) continue;
       for (const fn of bucket) {
         try {
           fn(event);
@@ -379,6 +464,7 @@ class RoomEngine {
 
   /** Resolve a room record + hot engine room; null when code doesn't exist. */
   async getRoom(code: string): Promise<Room | null> {
+    await ensureRoomTemplateModeColumn();
     const cached = this.rooms.get(code);
     if (cached) {
       await cached.ensureLoaded().catch(() => null);
@@ -393,6 +479,8 @@ class RoomEngine {
         documentId: rooms.documentId,
         title: documents.title,
         language: documents.language,
+        locked: rooms.locked,
+        templateMode: rooms.templateMode,
       })
       .from(rooms)
       .innerJoin(documents, eq(rooms.documentId, documents.id))

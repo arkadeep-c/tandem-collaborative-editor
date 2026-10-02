@@ -1,13 +1,16 @@
-import { NextResponse } from "next/server";
-import { db } from "@/db";
-import { roomMembers } from "@/db/schema";
+import { NextRequest, NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
+import { db, isUsingLocalDb } from "@/db";
+import { roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
 import { roomJoinLimiter } from "@/lib/rateLimit";
 import { isValidRoomCode, normalizeRoomCode } from "@/lib/roomCode";
-import { findRoomByCode, getMembership } from "@/lib/roomAccess";
+import { findRoomByCode, getMembership, listRoomMembers } from "@/lib/roomAccess";
+import { normalizeRoomTemplateMode } from "@/lib/roomTemplates";
 import {
   createSession,
-  getSessionUser,
+  createBearerToken,
+  getAuthenticatedSessionFromRequest,
   serializeSessionCookie,
   SESSION_COOKIE,
   sessionCookieOptions,
@@ -19,24 +22,23 @@ export const dynamic = "force-dynamic";
 type RouteContext = { params: Promise<{ code: string }> };
 
 /**
- * POST /api/rooms/:code/join — idempotent membership grant.
- *
- *   validate/normalize code → room exists → insert membership
- *   (ON CONFLICT DO NOTHING makes repeat joins, refreshes, and
- *   owner-rejoins no-ops) → return room info + role.
- *
- * Issues an anonymous session first when the visitor has none, so a
- * shared link works as the very first touch with the app.
+ * POST /api/rooms/:code/join — idempotent membership grant. Accepts cookie OR bearer.
  */
-export async function POST(_request: Request, ctx: RouteContext) {
+export async function POST(request: NextRequest, ctx: RouteContext) {
   const { code: rawCode } = await ctx.params;
 
-  let session: SessionUser | null = await getSessionUser();
+  const auth = await getAuthenticatedSessionFromRequest(request);
+  let session: SessionUser | null = auth.session;
   let issueCookie: string | null = null;
+  let issueBearer: string | null = null;
+
   if (!session) {
     const created = await createSession();
     session = { sessionId: created.sessionId, user: created.user };
     issueCookie = serializeSessionCookie(created.token);
+    issueBearer = createBearerToken(created.sessionId);
+  } else if (!auth.cookieValid) {
+    issueBearer = createBearerToken(session.sessionId);
   }
 
   if (!roomJoinLimiter.hit(session.user.id)) {
@@ -57,23 +59,70 @@ export async function POST(_request: Request, ctx: RouteContext) {
   }
 
   const existing = await getMembership(found.room.id, session.user.id);
-  if (!existing) {
-    await db
-      .insert(roomMembers)
-      .values({ roomId: found.room.id, userId: session.user.id, role: "editor" })
-      .onConflictDoNothing();
+  if (!existing && found.room.locked) {
+    return NextResponse.json(
+      { error: "This room is locked by the room owner." },
+      { status: 403 },
+    );
   }
 
-  const response = NextResponse.json({
+  let grantedRole = existing?.role ?? "editor";
+  let insertedMembership = false;
+  if (!existing) {
+    const [anyMember] = await (db as any)
+      .select({ userId: roomMembers.userId })
+      .from(roomMembers)
+      .where(eq(roomMembers.roomId, found.room.id))
+      .limit(1);
+    grantedRole = anyMember ? "editor" : "owner";
+    if (isUsingLocalDb()) {
+      (db as any)
+        .insert(roomMembers)
+        .values({ roomId: found.room.id, userId: session.user.id, role: grantedRole })
+        .onConflictDoNothing()
+        .run();
+      if (grantedRole === "owner") {
+        (db as any).update(rooms).set({ ownerId: session.user.id, updatedAt: new Date() }).where(eq(rooms.id, found.room.id)).run();
+      }
+    } else {
+      await (db as any)
+        .insert(roomMembers)
+        .values({ roomId: found.room.id, userId: session.user.id, role: grantedRole })
+        .onConflictDoNothing();
+      if (grantedRole === "owner") {
+        await (db as any).update(rooms).set({ ownerId: session.user.id, updatedAt: new Date() }).where(eq(rooms.id, found.room.id));
+      }
+    }
+    insertedMembership = true;
+  }
+
+  const activeRoom = await roomEngine.getRoom(code);
+  const members = await listRoomMembers(
+    found.room.id,
+    activeRoom ? [...activeRoom.users.values()] : [],
+  );
+  if (insertedMembership && typeof activeRoom?.notifyMemberJoined === "function") {
+    activeRoom.notifyMemberJoined(session.user, members);
+  }
+
+  const responseBody: any = {
     room: {
       code,
       title: found.document.title,
       language: found.document.language,
+      locked: Boolean(found.room.locked),
+      templateMode: normalizeRoomTemplateMode(found.room.templateMode),
       activeUsers: roomEngine.getActiveCount(code),
     },
-    role: existing?.role ?? "editor",
+    members,
+    role: grantedRole,
     alreadyMember: Boolean(existing),
-  });
+  };
+  if (issueBearer && !auth.cookieValid) {
+    responseBody.sessionToken = issueBearer;
+  }
+
+  const response = NextResponse.json(responseBody);
   if (issueCookie) {
     response.cookies.set(SESSION_COOKIE, issueCookie, sessionCookieOptions());
   }

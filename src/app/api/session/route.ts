@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { db } from "@/db";
+import { db, isUsingLocalDb } from "@/db";
 import { users } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
 import { ensureSeed } from "@/lib/seed";
 import {
   createSession,
-  getSessionUser,
+  createBearerToken,
+  getAuthenticatedSessionFromRequest,
   serializeSessionCookie,
   SESSION_COOKIE,
   sessionCookieOptions,
@@ -17,25 +18,31 @@ export const dynamic = "force-dynamic";
 
 /**
  * GET /api/session — idempotent session bootstrap.
- * Returns the verified anonymous user; provisions one (user + signed
- * HttpOnly cookie) when the browser arrives empty-handed or expired.
+ * PRIMARY: HttpOnly signed cookie
+ * FALLBACK: Signed bearer token in JSON when cookie unavailable (Arena iframe)
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   await ensureSeed().catch((err) => console.error("[seed]", err));
 
-  const existing = await getSessionUser();
-  if (existing) {
-    return NextResponse.json({
+  const auth = await getAuthenticatedSessionFromRequest(request);
+  if (auth.session) {
+    const responseBody: any = {
       user: {
-        id: existing.user.id,
-        name: existing.user.name,
-        color: existing.user.color,
+        id: auth.session.user.id,
+        name: auth.session.user.name,
+        color: auth.session.user.color,
       },
       fresh: false,
-    });
+    };
+    // If cookie not valid (authenticated via bearer), return bearer token for client storage
+    if (!auth.cookieValid) {
+      responseBody.sessionToken = createBearerToken(auth.session.sessionId);
+    }
+    return NextResponse.json(responseBody);
   }
 
   const created = await createSession();
+  const bearer = createBearerToken(created.sessionId);
   const response = NextResponse.json({
     user: {
       id: created.user.id,
@@ -43,6 +50,7 @@ export async function GET() {
       color: created.user.color,
     },
     fresh: true,
+    sessionToken: bearer,
   });
   response.cookies.set(
     SESSION_COOKIE,
@@ -54,10 +62,11 @@ export async function GET() {
 
 /**
  * PATCH /api/session — update the CALLER'S cosmetic profile (display name,
- * presence color). The user id is never accepted from the client.
+ * presence color). Accepts cookie OR bearer fallback.
  */
 export async function PATCH(request: NextRequest) {
-  const session = await getSessionUser();
+  const auth = await getAuthenticatedSessionFromRequest(request);
+  const session = auth.session;
   if (!session) {
     return NextResponse.json({ error: "Session expired." }, { status: 401 });
   }
@@ -85,19 +94,29 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ error: "Nothing to update." }, { status: 400 });
   }
 
-  const [user] = await db
-    .update(users)
-    .set(patch)
-    .where(eq(users.id, session.user.id))
-    .returning();
+  let user: any;
+  if (isUsingLocalDb()) {
+    user = (db as any).update(users).set(patch).where(eq(users.id, session.user.id)).returning().get();
+  } else {
+    const [u] = await (db as any)
+      .update(users)
+      .set(patch)
+      .where(eq(users.id, session.user.id))
+      .returning();
+    user = u;
+  }
 
-  // Live rooms re-publish the new identity immediately.
   roomEngine.propagateIdentity(session.user.id, {
     name: user!.name,
     color: user!.color,
   });
 
-  return NextResponse.json({
+  const responseBody: any = {
     user: { id: user!.id, name: user!.name, color: user!.color },
-  });
+  };
+  if (!auth.cookieValid) {
+    responseBody.sessionToken = createBearerToken(session.sessionId);
+  }
+
+  return NextResponse.json(responseBody);
 }

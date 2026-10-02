@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { applyOp, transformBatch, transformOffset, transformOp } from "@/lib/ot";
+import {
+  applyOp,
+  rebaseSequentialOps,
+  transformBatch,
+  transformOffset,
+  transformOp,
+} from "@/lib/ot";
 import type { TextOp } from "@/lib/types";
+
+function applyOps(content: string, ops: TextOp[]): string {
+  return ops.reduce(applyOp, content);
+}
 
 describe("offset transforms", () => {
   it("shifts offsets after concurrent inserts", () => {
@@ -43,6 +53,96 @@ describe("op transforms", () => {
       { type: "delete", offset: 0, length: 10 },
     );
     expect(op).toBeNull();
+  });
+});
+
+describe("sequential operation scripts", () => {
+  it("keeps rapid typing buffered behind an outstanding op in sequence", () => {
+    const first: TextOp = { type: "insert", offset: 0, text: "i" };
+    const buffered: TextOp[] = [
+      { type: "insert", offset: 1, text: "n" },
+      { type: "insert", offset: 2, text: "t" },
+      { type: "insert", offset: 3, text: " " },
+      { type: "insert", offset: 4, text: "a" },
+      { type: "insert", offset: 5, text: ";" },
+      { type: "insert", offset: 6, text: "{" },
+    ];
+
+    const afterFirst = applyOp("", first);
+    const rebased = rebaseSequentialOps(buffered, []);
+
+    expect(rebased).toEqual(buffered);
+    expect(applyOps(afterFirst, rebased)).toBe("int a;{");
+  });
+
+  it("keeps sequential forward deletions in sequence", () => {
+    const ops: TextOp[] = [
+      { type: "delete", offset: 0, length: 1 },
+      { type: "delete", offset: 0, length: 1 },
+      { type: "delete", offset: 0, length: 1 },
+    ];
+
+    expect(applyOps("abcdef", rebaseSequentialOps(ops, []))).toBe("def");
+  });
+
+  it("keeps sequential backspace-style deletions in sequence", () => {
+    const ops: TextOp[] = [
+      { type: "delete", offset: 5, length: 1 },
+      { type: "delete", offset: 4, length: 1 },
+      { type: "delete", offset: 3, length: 1 },
+    ];
+
+    expect(applyOps("abcdef", rebaseSequentialOps(ops, []))).toBe("abc");
+  });
+
+  it("keeps sequential newline insertion in sequence", () => {
+    const ops: TextOp[] = [
+      { type: "insert", offset: 0, text: "int" },
+      { type: "insert", offset: 3, text: "\n" },
+      { type: "insert", offset: 4, text: "a;{" },
+    ];
+
+    expect(applyOps("", rebaseSequentialOps(ops, []))).toBe("int\na;{");
+  });
+
+  it("keeps a rapid paste after an outstanding op in sequence", () => {
+    const first: TextOp = { type: "insert", offset: 0, text: "hello" };
+    const paste: TextOp[] = [
+      { type: "insert", offset: 5, text: "\nline1\nline2" },
+    ];
+
+    expect(applyOps(applyOp("", first), rebaseSequentialOps(paste, []))).toBe(
+      "hello\nline1\nline2",
+    );
+  });
+
+  it("does not self-transform a multi-operation sequential batch", () => {
+    const ops: TextOp[] = [
+      { type: "insert", offset: 0, text: "A" },
+      { type: "insert", offset: 1, text: "B" },
+      { type: "insert", offset: 2, text: "C" },
+    ];
+
+    expect(rebaseSequentialOps(ops, [])).toEqual(ops);
+    expect(applyOps("", rebaseSequentialOps(ops, []))).toBe("ABC");
+  });
+
+  it("rebases a stale sequential batch over missed remote operations", () => {
+    const initial = "abc";
+    const missed: TextOp[] = [{ type: "insert", offset: 0, text: "Z" }];
+    const localSequential: TextOp[] = [
+      { type: "insert", offset: 3, text: "X" },
+      { type: "insert", offset: 4, text: "Y" },
+    ];
+
+    const serverAtTip = applyOps(initial, missed);
+    const rebased = rebaseSequentialOps(localSequential, missed);
+
+    expect(rebased).toEqual([
+      { type: "insert", offset: 4, text: "X" },
+      { type: "insert", offset: 5, text: "Y" },
+    ]);
+    expect(applyOps(serverAtTip, rebased)).toBe("ZabcXY");
   });
 });
 

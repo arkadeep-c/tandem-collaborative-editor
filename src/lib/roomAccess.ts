@@ -1,22 +1,26 @@
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
+import { and, asc, eq } from "drizzle-orm";
+import type { NextRequest } from "next/server";
+import { db, ensureRoomTemplateModeColumn } from "@/db";
 import {
   documents,
   roomMembers,
   rooms,
+  users,
   type DocumentRow,
   type RoomMemberRow,
   type RoomRow,
 } from "@/db/schema";
-import { getSessionUser, type SessionUser } from "@/lib/session";
+import {
+  getAuthenticatedSessionFromRequest,
+  getSessionUser,
+  type SessionUser,
+} from "@/lib/session";
 import { isValidRoomCode, normalizeRoomCode } from "@/lib/roomCode";
+import type { PresenceState, RoomMemberInfo, RoomRole } from "@/lib/types";
 
 /**
  * Central authorization gate for every room-scoped route.
- *
- * Each sensitive endpoint calls `requireRoomAccess` (or the lighter
- * `findRoomByCode` for the public join-preview) so the checks are written
- * once: valid session → well-formed code → room exists → membership.
+ * Supports cookie primary + bearer fallback.
  */
 
 export interface RoomWithDocument {
@@ -27,6 +31,7 @@ export interface RoomWithDocument {
 export async function findRoomByCode(
   rawCode: string,
 ): Promise<RoomWithDocument | null> {
+  await ensureRoomTemplateModeColumn();
   const code = normalizeRoomCode(rawCode);
   if (!isValidRoomCode(code)) return null;
   const rows = await db
@@ -50,6 +55,45 @@ export async function getMembership(
   return rows[0] ?? null;
 }
 
+function toIso(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number" || typeof value === "string") {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return new Date().toISOString();
+}
+
+export async function listRoomMembers(
+  roomId: string,
+  activePresence: PresenceState[] = [],
+): Promise<RoomMemberInfo[]> {
+  const onlineIds = new Set(activePresence.map((presence) => presence.user.id));
+  const rows = await db
+    .select({
+      role: roomMembers.role,
+      joinedAt: roomMembers.joinedAt,
+      userId: users.id,
+      name: users.name,
+      color: users.color,
+    })
+    .from(roomMembers)
+    .innerJoin(users, eq(roomMembers.userId, users.id))
+    .where(eq(roomMembers.roomId, roomId))
+    .orderBy(asc(roomMembers.joinedAt));
+
+  return rows.map((row: any) => ({
+    user: {
+      id: row.userId,
+      name: row.name,
+      color: row.color,
+    },
+    role: row.role === "owner" ? "owner" : ("editor" as RoomRole),
+    joinedAt: toIso(row.joinedAt),
+    online: onlineIds.has(row.userId),
+  }));
+}
+
 export type RoomAccess =
   | {
       ok: true;
@@ -62,15 +106,22 @@ export type RoomAccess =
   | { ok: false; status: 400 | 401 | 403 | 404; error: string };
 
 export interface RoomAccessOptions {
-  /** When true, the member must be the room owner. */
   ownerOnly?: boolean;
 }
 
 export async function requireRoomAccess(
   rawCode: string,
+  request?: NextRequest,
   options: RoomAccessOptions = {},
 ): Promise<RoomAccess> {
-  const session = await getSessionUser();
+  let session: SessionUser | null = null;
+  if (request) {
+    const auth = await getAuthenticatedSessionFromRequest(request);
+    session = auth.session;
+  } else {
+    session = await getSessionUser();
+  }
+
   if (!session) {
     return { ok: false, status: 401, error: "Session expired." };
   }

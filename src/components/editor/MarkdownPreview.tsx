@@ -42,23 +42,23 @@ function MarkdownPreview({ markdown }: MarkdownPreviewProps) {
               href={href}
               target="_blank"
               rel="noreferrer"
-              className="font-medium text-violet-300 underline decoration-violet-300/40 underline-offset-2 transition hover:text-violet-200"
+              className="font-medium text-teal-300 underline decoration-teal-300/40 underline-offset-2 transition hover:text-teal-200"
             >
               {children}
             </a>
           ),
           ul: ({ children }) => (
-            <ul className="mb-4 list-disc space-y-1.5 pl-6 text-slate-300 marker:text-violet-400">
+            <ul className="mb-4 list-disc space-y-1.5 pl-6 text-slate-300 marker:text-teal-400">
               {children}
             </ul>
           ),
           ol: ({ children }) => (
-            <ol className="mb-4 list-decimal space-y-1.5 pl-6 text-slate-300 marker:text-violet-400">
+            <ol className="mb-4 list-decimal space-y-1.5 pl-6 text-slate-300 marker:text-teal-400">
               {children}
             </ol>
           ),
           blockquote: ({ children }) => (
-            <blockquote className="mb-4 rounded-r-lg border-l-2 border-violet-400/70 bg-violet-400/5 py-1 pl-4 pr-3 italic text-slate-300">
+            <blockquote className="mb-4 rounded-r-lg border-l-2 border-teal-400/70 bg-teal-400/5 py-1 pl-4 pr-3 italic text-slate-300">
               {children}
             </blockquote>
           ),
