@@ -198,6 +198,26 @@ interface InteractiveProcess {
   result: Promise<SpawnResult>;
 }
 
+export interface InteractiveStdinStream {
+  readonly destroyed?: boolean;
+  readonly writableEnded?: boolean;
+  write(chunk: string): boolean;
+}
+
+export function writeInteractiveStdin(
+  stream: InteractiveStdinStream,
+  chunk: string,
+): boolean {
+  if (stream.destroyed || stream.writableEnded) return false;
+
+  try {
+    stream.write(chunk);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface InteractiveExecutionHandle {
   writeStdin(chunk: string): boolean;
   stop(): void;
@@ -695,12 +715,8 @@ function rawSpawnInteractive(
 
   return {
     writeStdin(chunk: string) {
-      if (settled || child.stdin.destroyed || child.stdin.writableEnded) return false;
-      try {
-        return child.stdin.write(chunk);
-      } catch {
-        return false;
-      }
+      if (settled) return false;
+      return writeInteractiveStdin(child.stdin, chunk);
     },
     stop() {
       aborted = true;

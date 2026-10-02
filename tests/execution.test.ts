@@ -19,6 +19,7 @@ import {
   JAVA_SOURCE_FILENAME,
   JAVA_VM_ARGS,
   prepareJavaWorkspace,
+  writeInteractiveStdin,
   parseBashErrors,
   parseCppErrors,
   parseJavaErrors,
@@ -300,6 +301,25 @@ describe("execution lifecycle classification", () => {
     expect(statusFromCompileLifecycle({ timedOut: true, outputTruncated: false, stderr: "" })).toBe("timeout");
     expect(statusFromCompileLifecycle({ timedOut: false, outputTruncated: false, stderr: "Main.java:1: error: ';' expected" })).toBe("compile_error");
   });
+
+  it("treats stdin pipe backpressure as an accepted interactive write", () => {
+    let received = "";
+    const stream = {
+      destroyed: false,
+      writableEnded: false,
+      write(chunk: string) {
+        received += chunk;
+        return false;
+      },
+    };
+
+    expect(writeInteractiveStdin(stream, "3\n")).toBe(true);
+    expect(received).toBe("3\n");
+
+    stream.writableEnded = true;
+    expect(writeInteractiveStdin(stream, "4\n")).toBe(false);
+    expect(received).toBe("3\n");
+  });
 });
 
 describe("execution diagnostics parsers", () => {
@@ -535,6 +555,40 @@ int main(void) {
         );
         expect(events.some((event) => event.type === "stdout" && event.chunk.includes("Sum ="))).toBe(false);
         handle.writeStdin("2 3\n");
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout).toContain("Enter two numbers:");
+    expect(execution.result.stdout).toContain("Sum = 5");
+  }, 20_000);
+
+  it("accepts browser-style sequential lines for one scanf format", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "c",
+      `#include <stdio.h>
+int main(void) {
+    int a, b;
+    printf("Enter two numbers: ");
+    if (scanf("%d %d", &a, &b) != 2) return 2;
+    printf("Sum = %d\\n", a + b);
+    return 0;
+}
+`,
+      async (handle, events) => {
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("Enter two numbers:"),
+        );
+        expect(handle.writeStdin("2\n")).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(events.some((event) => event.type === "stdout" && event.chunk.includes("Sum ="))).toBe(false);
+        expect(handle.writeStdin("3\n")).toBe(true);
       },
     );
 
