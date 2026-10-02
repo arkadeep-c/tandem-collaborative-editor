@@ -165,6 +165,10 @@ export function getHostExecutionPath(
   return hostPlatform === "win32" ? hostPath ?? "" : SAFE_PATH;
 }
 
+export function normalizeBashSourceLineEndings(code: string): string {
+  return code.replace(/\r\n?/g, "\n");
+}
+
 export const JAVA_VM_ARGS = [
   "-Xmx256m",
   "-XX:+UseSerialGC",
@@ -2214,7 +2218,7 @@ export async function executeCode(
 
         await fs.writeFile(
           join(workDir, filename),
-          code,
+          normalizeBashSourceLineEndings(code),
           "utf8",
         );
 
@@ -2573,7 +2577,11 @@ export function startInteractiveExecution(
 
         case "bash": {
           const filename = "main.sh";
-          await fs.writeFile(join(workDir, filename), code, "utf8");
+          await fs.writeFile(
+            join(workDir, filename),
+            normalizeBashSourceLineEndings(code),
+            "utf8",
+          );
           const runResult = await run("bash", [filename]);
           executionResult = runtimeResult(
             runResult,

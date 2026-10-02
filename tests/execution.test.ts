@@ -21,6 +21,7 @@ import {
   JAVA_MAIN_CLASS,
   JAVA_SOURCE_FILENAME,
   JAVA_VM_ARGS,
+  normalizeBashSourceLineEndings,
   prepareJavaWorkspace,
   writeInteractiveStdin,
   parseBashErrors,
@@ -455,6 +456,14 @@ describe("execution lifecycle classification", () => {
       if (previous === undefined) delete process.env.TANDEM_EXECUTION_TIMEOUT_MS;
       else process.env.TANDEM_EXECUTION_TIMEOUT_MS = previous;
     }
+  });
+
+  it("normalizes Bash source line endings without changing LF-only scripts", () => {
+    const lfOnly = "echo one\nread -r NAME\necho \"$NAME\"\n";
+    expect(normalizeBashSourceLineEndings(lfOnly)).toBe(lfOnly);
+    expect(
+      normalizeBashSourceLineEndings("echo one\r\nread -r NAME\r\necho \"$NAME\"\r"),
+    ).toBe(lfOnly);
   });
 
   it("preserves timeout state for killed compile processes", () => {
@@ -978,6 +987,38 @@ int main(void) {
 
     expect(execution.result.status).toBe("cancelled");
     expect(execution.result.stderr).toBe("Execution stopped by user.");
+  }, 20_000);
+
+  it("keeps interactive Bash read working when the source uses CRLF line endings", async () => {
+    const crlfScript = [
+      "#!/usr/bin/env bash",
+      "printf \"Name: \"",
+      "read -r NAME",
+      "printf \"Hello %s\\n\" \"$NAME\"",
+      "",
+    ].join("\r\n");
+
+    const execution = await runInteractiveDockerWhenReady(
+      "bash",
+      crlfScript,
+      async (handle, events) => {
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("Name:"),
+        );
+        expect(handle.writeStdin("Ada\n")).toBe(true);
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout).toContain("Name:");
+    expect(execution.result.stdout).toContain("Hello Ada");
+    expect(execution.result.stderr).not.toMatch(/not a valid identifier|\$'\\r'|command not found/);
   }, 20_000);
 
   it("does not route stdin to another user or room execution", async () => {
@@ -1672,6 +1713,34 @@ else:
 });
 
 describe("Docker-backed execution integration", () => {
+  it("executes Bash scripts with CRLF line endings without carriage-return command errors", async () => {
+    const crlfScript = [
+      "#!/usr/bin/env bash",
+      "",
+      "echo \"Hello from Bash\"",
+      "",
+      "echo \"Line 2 works\"",
+      "",
+      "echo \"Line 3 works\"",
+      "",
+    ].join("\r\n");
+
+    const execution = await runDockerWhenReady("bash", crlfScript);
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout.trim()).toBe([
+      "Hello from Bash",
+      "Line 2 works",
+      "Line 3 works",
+    ].join("\n"));
+    expect(execution.result.stderr).not.toMatch(/\$'\\r'|command not found/);
+    expect(execution.result.exitCode).toBe(0);
+  }, 20_000);
+
   it("executes stdin arithmetic for every executable language when Docker is configured", async () => {
     const cases: Array<[ExecutionLanguage, string, string]> = [
       ["c", `#include <stdio.h>
