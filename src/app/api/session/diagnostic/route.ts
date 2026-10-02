@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionDiagnostics, getAuthenticatedSessionFromRequest } from "@/lib/session";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
  * GET /api/session/diagnostic — development-only cookie persistence test.
  */
-export async function GET(request: NextRequest) {
+async function GETHandler(request: NextRequest) {
   if (process.env.NODE_ENV === "production") {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -34,3 +36,5 @@ export async function GET(request: NextRequest) {
     },
   });
 }
+
+export const GET = withJsonErrors("api.session.diagnostic.get", GETHandler);

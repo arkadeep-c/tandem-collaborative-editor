@@ -3,15 +3,19 @@ import { and, eq } from "drizzle-orm";
 import { db, isUsingLocalDb } from "@/db";
 import { roomMembers, users } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
+import { getRedisPresence, publishRedisEvent, removeRedisUserPresence } from "@/lib/collab/redisRealtime";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
 import { getMembership, listRoomMembers, requireRoomAccess } from "@/lib/roomAccess";
 import type { ClientUser } from "@/lib/types";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string; userId: string }> };
 
 /** POST /api/rooms/:code/members/:userId/kick — owner-only member removal. */
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code, userId: rawUserId } = await ctx.params;
   const targetUserId = decodeURIComponent(rawUserId ?? "").trim();
   if (!targetUserId) {
@@ -90,14 +94,29 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     );
   }
 
-  const activeRoom = await roomEngine.getRoom(access.code);
-  const members = await listRoomMembers(
-    access.room.id,
-    activeRoom ? [...activeRoom.users.values()] : [],
-  );
-  if (typeof activeRoom?.notifyMemberKicked === "function") {
-    activeRoom.notifyMemberKicked(targetUser, members);
+  if (shouldUseRedisRealtime()) {
+    await publishRedisEvent(access.code, {
+      type: "access_revoked",
+      reason: "kicked",
+      userId: targetUser.id,
+      message: "You were removed from this coding room by the room owner.",
+    });
+    await removeRedisUserPresence(access.code, targetUser.id);
+    const presence = await getRedisPresence(access.code);
+    const members = await listRoomMembers(access.room.id, presence);
+    await publishRedisEvent(access.code, { type: "member_kick", user: targetUser, members });
+  } else {
+    const activeRoom = await roomEngine.getRoom(access.code);
+    const members = await listRoomMembers(
+      access.room.id,
+      activeRoom ? [...activeRoom.users.values()] : [],
+    );
+    if (typeof activeRoom?.notifyMemberKicked === "function") {
+      activeRoom.notifyMemberKicked(targetUser, members);
+    }
   }
 
   return NextResponse.json({ ok: true, removed: targetUser });
 }
+
+export const POST = withJsonErrors("api.rooms.[code].members.[userId].kick.post", POSTHandler);

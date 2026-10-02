@@ -1,71 +1,51 @@
 /**
- * Database layer with PostgreSQL as production and SQLite as preview fallback.
+ * Database layer with PostgreSQL as the Vercel/production database and SQLite
+ * only as an explicit local/ephemeral fallback.
  *
- * Production:
- *   DATABASE_URL required (unless explicit preview mode)
- *   Uses pg Pool + drizzle-orm/node-postgres
+ * Production deployments (APP_ENV=production or VERCEL_ENV=production):
+ *   - DATABASE_URL is required.
+ *   - localhost/127.0.0.1 database URLs are rejected.
+ *   - USE_LOCAL_DEV_DB is ignored and cannot silently select SQLite.
  *
- * Preview / Development fallback:
- *   When APP_ENV=preview or USE_LOCAL_DEV_DB=true or DATABASE_URL missing in non-production,
- *   uses file-backed SQLite via better-sqlite3 + drizzle-orm/better-sqlite3
- *   File: ./data/tandem.db (or :memory: if configured)
- *
- * This fallback exists ONLY so Arena preview can be genuinely tested without external services.
- * Production must continue requiring PostgreSQL.
+ * Local/ephemeral development:
+ *   - APP_ENV=development, USE_LOCAL_DEV_DB=true, or a missing DATABASE_URL
+ *     outside production builds enables the SQLite fallback. Vercel Preview
+ *     deployments should provide managed PostgreSQL unless they explicitly opt
+ *     into the ephemeral local fallback.
  */
 
-function isPreviewMode(): boolean {
-  return process.env.APP_ENV === "preview" || process.env.USE_LOCAL_DEV_DB === "true";
-}
+import { ConfigurationError, requireProductionDatabaseUrl, shouldUseLocalDatabase } from "@/lib/deployment";
 
-function shouldUseLocalDb(): boolean {
-  // Explicit preview flag takes precedence
-  if (isPreviewMode()) return true;
-  // In non-production, if DATABASE_URL missing, use local fallback
-  if (!process.env.DATABASE_URL && process.env.NODE_ENV !== "production") return true;
-  return false;
-}
-
-// Global cache to avoid multiple connections in dev HMR
 const globalForDb = globalThis as typeof globalThis & {
   __arenaPgPool?: import("pg").Pool;
   __arenaSqliteDb?: import("better-sqlite3").Database;
   __arenaDrizzleDb?: any;
+  __arenaDbMode?: "postgres" | "sqlite";
 };
 
 let dbInstance: any;
 let poolInstance: import("pg").Pool | null = null;
 let sqliteInstance: import("better-sqlite3").Database | null = null;
+let roomTemplateModeColumnPromise: Promise<void> | null = null;
 
-if (globalForDb.__arenaDrizzleDb) {
-  dbInstance = globalForDb.__arenaDrizzleDb;
-  // @ts-ignore
-  poolInstance = globalForDb.__arenaPgPool ?? null;
-  // @ts-ignore
-  sqliteInstance = globalForDb.__arenaSqliteDb ?? null;
-} else if (shouldUseLocalDb()) {
-  // SQLite preview fallback
+function initializeLocalSqlite() {
   const fs = require("fs");
   const path = require("path");
   const Database = require("better-sqlite3");
   const { drizzle } = require("drizzle-orm/better-sqlite3");
 
   const dbPath = process.env.SQLITE_DB_PATH || path.join(process.cwd(), "data", "tandem.db");
-
-  // Ensure directory exists
   const dir = path.dirname(dbPath);
-  if (!fs.existsSync(dir)) {
+  if (dbPath !== ":memory:" && !fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  console.log(`[db] Using SQLite preview fallback at ${dbPath} (APP_ENV=${process.env.APP_ENV} USE_LOCAL_DEV_DB=${process.env.USE_LOCAL_DEV_DB})`);
+  console.log(`[db] Using SQLite local fallback at ${dbPath} (APP_ENV=${process.env.APP_ENV} USE_LOCAL_DEV_DB=${process.env.USE_LOCAL_DEV_DB})`);
 
   const sqlite = new Database(dbPath);
-  // Enable WAL for better concurrency and foreign keys
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
 
-  // Create tables if not exist — matches schema.ts sqlite definitions
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
@@ -119,20 +99,15 @@ if (globalForDb.__arenaDrizzleDb) {
     sqlite.exec("ALTER TABLE rooms ADD COLUMN template_mode TEXT NOT NULL DEFAULT 'starter'");
   }
 
-  dbInstance = drizzle(sqlite);
   sqliteInstance = sqlite;
+  dbInstance = drizzle(sqlite);
+  globalForDb.__arenaSqliteDb = sqlite;
+  globalForDb.__arenaDrizzleDb = dbInstance;
+  globalForDb.__arenaDbMode = "sqlite";
+}
 
-  if (process.env.NODE_ENV !== "production") {
-    globalForDb.__arenaSqliteDb = sqlite;
-    globalForDb.__arenaDrizzleDb = dbInstance;
-  }
-} else {
-  // PostgreSQL production path
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    throw new Error("DATABASE_URL is required (set APP_ENV=preview or USE_LOCAL_DEV_DB=true for local fallback)");
-  }
-
+function initializePostgres() {
+  const databaseUrl = requireProductionDatabaseUrl();
   const { Pool } = require("pg");
   const { drizzle } = require("drizzle-orm/node-postgres");
 
@@ -140,31 +115,62 @@ if (globalForDb.__arenaDrizzleDb) {
     globalForDb.__arenaPgPool ??
     new Pool({
       connectionString: databaseUrl,
+      max: Number(process.env.POSTGRES_POOL_MAX ?? (process.env.VERCEL ? 1 : 10)),
+      connectionTimeoutMillis: 5_000,
+      idleTimeoutMillis: 10_000,
     });
 
-  if (process.env.NODE_ENV !== "production") {
-    globalForDb.__arenaPgPool = pool;
-  }
-
-  dbInstance = drizzle(pool);
+  globalForDb.__arenaPgPool = pool;
   poolInstance = pool;
-
-  if (process.env.NODE_ENV !== "production") {
-    globalForDb.__arenaDrizzleDb = dbInstance;
-  }
+  dbInstance = drizzle(pool);
+  globalForDb.__arenaDrizzleDb = dbInstance;
+  globalForDb.__arenaDbMode = "postgres";
 }
 
-export const pool = poolInstance;
-export const sqliteDb = sqliteInstance;
-export const db = dbInstance;
+function initializeDb(): any {
+  if (dbInstance) return dbInstance;
+  if (globalForDb.__arenaDrizzleDb) {
+    dbInstance = globalForDb.__arenaDrizzleDb;
+    poolInstance = globalForDb.__arenaPgPool ?? null;
+    sqliteInstance = globalForDb.__arenaSqliteDb ?? null;
+    return dbInstance;
+  }
 
-let roomTemplateModeColumnPromise: Promise<void> | null = null;
+  if (shouldUseLocalDatabase()) {
+    initializeLocalSqlite();
+  } else {
+    initializePostgres();
+  }
+
+  return dbInstance;
+}
+
+export const db = new Proxy({} as any, {
+  get(_target, prop) {
+    const instance = initializeDb();
+    const value = instance[prop as keyof typeof instance];
+    return typeof value === "function" ? value.bind(instance) : value;
+  },
+});
+
+export function getDb(): any {
+  return initializeDb();
+}
+
+export function getPgPool(): import("pg").Pool | null {
+  initializeDb();
+  return poolInstance;
+}
+
+export const pool = null as import("pg").Pool | null;
+export const sqliteDb = null as import("better-sqlite3").Database | null;
 
 export async function ensureRoomTemplateModeColumn(): Promise<void> {
-  if (shouldUseLocalDb()) return;
-  if (!poolInstance) return;
+  if (shouldUseLocalDatabase()) return;
+  const pool = getPgPool();
+  if (!pool) return;
 
-  roomTemplateModeColumnPromise ??= poolInstance
+  roomTemplateModeColumnPromise ??= pool
     .query("ALTER TABLE rooms ADD COLUMN IF NOT EXISTS template_mode TEXT NOT NULL DEFAULT 'starter'")
     .then(() => undefined);
 
@@ -172,9 +178,20 @@ export async function ensureRoomTemplateModeColumn(): Promise<void> {
 }
 
 export function isUsingLocalDb(): boolean {
-  return shouldUseLocalDb();
+  return shouldUseLocalDatabase();
 }
 
 export function getDbMode(): "postgres" | "sqlite" {
-  return shouldUseLocalDb() ? "sqlite" : "postgres";
+  if (globalForDb.__arenaDbMode) return globalForDb.__arenaDbMode;
+  return shouldUseLocalDatabase() ? "sqlite" : "postgres";
+}
+
+export function assertDatabaseConfigured(): void {
+  if (shouldUseLocalDatabase()) return;
+  try {
+    requireProductionDatabaseUrl();
+  } catch (err) {
+    if (err instanceof ConfigurationError) throw err;
+    throw new ConfigurationError("DATABASE_URL is required for production PostgreSQL.");
+  }
 }

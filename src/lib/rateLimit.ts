@@ -1,11 +1,12 @@
-/**
- * Lightweight sliding-window rate limiter.
- *
- * The collaboration engine is single-process by design (see README), so an
- * in-process limiter is both sufficient and honest. Keys are server-side
- * identities (user ids / connection ids), never client-claimed values.
- */
+import { getRedisClient } from "@/lib/collab/store";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
 
+/**
+ * Sliding-window rate limiter.
+ *
+ * Local development uses an in-process map. Production Vercel deployments use
+ * Redis so limits are shared across independent function instances.
+ */
 export class SlidingWindowLimiter {
   private readonly hits = new Map<string, number[]>();
   private lastSweep = Date.now();
@@ -15,7 +16,6 @@ export class SlidingWindowLimiter {
     private readonly windowMs: number,
   ) {}
 
-  /** Record one attempt; returns false when the caller exceeded the limit. */
   hit(key: string): boolean {
     const now = Date.now();
     this.sweep(now);
@@ -27,6 +27,29 @@ export class SlidingWindowLimiter {
     }
     list.push(now);
     this.hits.set(key, list);
+    return true;
+  }
+
+  async hitAsync(key: string): Promise<boolean> {
+    if (!shouldUseRedisRealtime()) return this.hit(key);
+
+    const redis = await getRedisClient({ required: true });
+    const now = Date.now();
+    const cutoff = now - this.windowMs;
+    const redisKey = `tandem:rate:${this.limit}:${this.windowMs}:${key.replace(/[^a-zA-Z0-9:_-]/g, "_")}`;
+    const member = `${now}:${Math.random().toString(36).slice(2)}`;
+    const results = await redis!
+      .multi()
+      .zremrangebyscore(redisKey, 0, cutoff)
+      .zadd(redisKey, now, member)
+      .zcard(redisKey)
+      .pexpire(redisKey, this.windowMs)
+      .exec();
+    const count = Number(results?.[2]?.[1] ?? 0);
+    if (count > this.limit) {
+      await redis!.zrem(redisKey, member).catch(() => undefined);
+      return false;
+    }
     return true;
   }
 

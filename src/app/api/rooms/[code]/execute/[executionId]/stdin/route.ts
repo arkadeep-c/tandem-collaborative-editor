@@ -3,14 +3,16 @@ import { requireRoomAccess } from "@/lib/roomAccess";
 import { MAX_STDIN_SIZE } from "@/lib/execution/executor";
 import { writeExecutionStdin } from "@/lib/execution/interactiveSessions";
 import { SlidingWindowLimiter } from "@/lib/rateLimit";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const stdinLimiter = new SlidingWindowLimiter(240, 60 * 1000);
 
 type RouteContext = { params: Promise<{ code: string; executionId: string }> };
 
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code, executionId } = await ctx.params;
 
   const access = await requireRoomAccess(code, request);
@@ -18,7 +20,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
-  if (!stdinLimiter.hit(access.session.user.id)) {
+  if (!(await stdinLimiter.hitAsync(access.session.user.id))) {
     return NextResponse.json({ error: "Too many input requests. Try again later." }, { status: 429 });
   }
 
@@ -45,3 +47,5 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
 
   return NextResponse.json({ ok: true });
 }
+
+export const POST = withJsonErrors("api.rooms.[code].execute.[executionId].stdin.post", POSTHandler);

@@ -30,8 +30,12 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/src ./src
+COPY --from=build /app/drizzle ./drizzle
+COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/drizzle.config.ts ./drizzle.config.ts
 
 EXPOSE 3000
-# drizzle-kit push is idempotent; on a fresh volume it creates the schema.
-CMD ["sh", "-c", "npx drizzle-kit push --force && npx next start"]
+# Apply Tandem's idempotent SQL migrations before starting when PostgreSQL is configured.
+# Local containers can still use the explicit SQLite fallback without DATABASE_URL.
+# Vercel deployments should run npm run db:migrate as an explicit deploy step.
+CMD ["sh", "-c", "if [ -n \"$DATABASE_URL\" ]; then npm run db:migrate; else echo 'DATABASE_URL not set; skipping PostgreSQL migrations (local SQLite fallback only).'; fi && npx next start"]

@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { roomEngine } from "@/lib/collab/rooms";
+import { updateRedisPresence } from "@/lib/collab/redisRealtime";
 import { presenceLimiter } from "@/lib/rateLimit";
 import { requireRoomAccess } from "@/lib/roomAccess";
 import type { CursorPosition, SelectionRange } from "@/lib/types";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string }> };
@@ -44,7 +48,7 @@ function isSelection(value: unknown): value is SelectionRange {
 }
 
 /** POST /api/rooms/:code/presence — caret/selection/typing fan-out. Accepts cookie OR bearer. */
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
   const access = await requireRoomAccess(code, request);
   if (!access.ok) {
@@ -55,13 +59,8 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   if (!body || typeof body.connectionId !== "string") {
     return NextResponse.json({ error: "Malformed request." }, { status: 400 });
   }
-  if (!presenceLimiter.hit(body.connectionId)) {
+  if (!(await presenceLimiter.hitAsync(body.connectionId))) {
     return NextResponse.json({ ok: true });
-  }
-
-  const room = await roomEngine.getRoom(access.code);
-  if (!room) {
-    return NextResponse.json({ error: "Room not found." }, { status: 404 });
   }
 
   const cursor =
@@ -76,14 +75,31 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "Malformed request." }, { status: 400 });
   }
 
-  const ok = room.updatePresence(body.connectionId, access.session.user.id, {
+  const patch = {
     cursor,
     selection,
     typing: body.typing === true,
-  });
+  };
+
+  if (shouldUseRedisRealtime()) {
+    const ok = await updateRedisPresence(access.code, body.connectionId, access.session.user.id, patch);
+    if (!ok) {
+      return NextResponse.json({ error: "Unauthorized." }, { status: 403 });
+    }
+    return NextResponse.json({ ok: true });
+  }
+
+  const room = await roomEngine.getRoom(access.code);
+  if (!room) {
+    return NextResponse.json({ error: "Room not found." }, { status: 404 });
+  }
+
+  const ok = room.updatePresence(body.connectionId, access.session.user.id, patch);
   if (!ok) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 403 });
   }
 
   return NextResponse.json({ ok: true });
 }
+
+export const POST = withJsonErrors("api.rooms.[code].presence.post", POSTHandler);

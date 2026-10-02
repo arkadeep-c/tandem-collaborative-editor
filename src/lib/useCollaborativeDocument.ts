@@ -86,6 +86,7 @@ export function useCollaborativeDocument(roomCode: string) {
   });
 
   const connectionIdRef = useRef("");
+  const selfUserIdRef = useRef<string | null>(null);
   const revisionRef = useRef(0);
   const outstandingRef = useRef<TextOp[] | null>(null);
   const bufferRef = useRef<TextOp[]>([]);
@@ -176,6 +177,7 @@ export function useCollaborativeDocument(roomCode: string) {
         case "init": {
           failuresRef.current = 0;
           connectionIdRef.current = event.sessionId;
+          selfUserIdRef.current = event.you.user.id;
           revisionRef.current = event.revision;
           outstandingRef.current = null;
           bufferRef.current = [];
@@ -328,6 +330,7 @@ export function useCollaborativeDocument(roomCode: string) {
           break;
         }
         case "access_revoked": {
+          if (event.userId && event.userId !== selfUserIdRef.current) break;
           showToast(event.message, "error");
           sourceRef.current?.close();
           sourceRef.current = null;

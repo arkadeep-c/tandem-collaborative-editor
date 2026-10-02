@@ -1,15 +1,14 @@
 /**
- * Unified schema supporting both PostgreSQL (production) and SQLite (preview fallback).
- * Production uses pgTable, preview uses sqliteTable when APP_ENV=preview or USE_LOCAL_DEV_DB=true
- * or when DATABASE_URL is missing in non-production.
+ * Unified schema supporting both PostgreSQL (production/Vercel) and SQLite
+ * (explicit local fallback). Production uses pgTable. SQLite is selected only
+ * for APP_ENV=development, USE_LOCAL_DEV_DB=true, or a missing DATABASE_URL in
+ * non-production local development.
  */
 
+import { shouldUseLocalDatabase } from "@/lib/deployment";
+
 function isLocalDb(): boolean {
-  return (
-    process.env.APP_ENV === "preview" ||
-    process.env.USE_LOCAL_DEV_DB === "true" ||
-    (!process.env.DATABASE_URL && process.env.NODE_ENV !== "production")
-  );
+  return shouldUseLocalDatabase();
 }
 
 // We define tables for both dialects but export based on env.
@@ -23,7 +22,7 @@ let rooms: any;
 let roomMembers: any;
 
 if (isLocalDb()) {
-  // SQLite fallback for Arena preview — file-backed, no external service required
+  // SQLite fallback for explicit local/ephemeral development — file-backed, no external service required
   const {
     sqliteTable,
     text,

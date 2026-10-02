@@ -15,7 +15,9 @@ import {
 } from "@/lib/session";
 import { initialContentForRoomTemplateMode, type RoomTemplateMode } from "@/lib/roomTemplates";
 import { cleanTitle, isLanguageId } from "@/lib/validation";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const newInternalId = customAlphabet(
@@ -28,7 +30,7 @@ const CODE_GENERATION_ATTEMPTS = 5;
 /**
  * POST /api/rooms — create a room. Accepts cookie OR bearer fallback.
  */
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   const auth = await getAuthenticatedSessionFromRequest(request);
   let session: SessionUser | null = auth.session;
   let issueCookie: string | null = null;
@@ -44,7 +46,7 @@ export async function POST(request: NextRequest) {
     issueBearer = createBearerToken(session.sessionId);
   }
 
-  if (!roomCreateLimiter.hit(session.user.id)) {
+  if (!(await roomCreateLimiter.hitAsync(session.user.id))) {
     return NextResponse.json(
       { error: "Too many rooms created. Try again later." },
       { status: 429 },
@@ -174,3 +176,5 @@ export async function POST(request: NextRequest) {
     { status: 500 },
   );
 }
+
+export const POST = withJsonErrors("api.rooms.post", POSTHandler);

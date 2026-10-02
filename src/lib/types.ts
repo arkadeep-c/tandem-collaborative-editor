@@ -119,7 +119,7 @@ export type ServerEvent =
   | { type: "member_kick"; user: ClientUser; members: RoomMemberInfo[] }
   | { type: "members"; members: RoomMemberInfo[] }
   | { type: "room_lock"; locked: boolean }
-  | { type: "access_revoked"; reason: "kicked"; message: string }
+  | { type: "access_revoked"; reason: "kicked"; message: string; userId?: string }
   | { type: "meta"; title?: string; language?: string }
   | { type: "saved"; revision: number; savedAt: string; mode: "redis" | "memory" }
   | { type: "error"; message: string };

@@ -1,16 +1,12 @@
 import Redis from "ioredis";
+import { ConfigurationError, productionRequiresRedis, shouldUseRedisRealtime } from "@/lib/deployment";
 
 /**
  * Hot-state document cache.
  *
- * During an active editing session the current buffer + revision live in this
- * cache so room reads/writes are O(1) and never touch PostgreSQL. A debounced
- * flusher persists to Postgres every 5s and on room shutdown.
- *
- * Two interchangeable backends implement `DocStore`:
- *  - `RedisDocStore`   — used when `REDIS_URL` is configured (docker topology,
- *                        any number of app instances share the same hot state)
- *  - `MemoryDocStore`  — zero-dependency fallback with identical semantics
+ * Local development can use an in-memory cache. Production Vercel deployments
+ * require Redis because active documents, presence, pub/sub fan-out, and rate
+ * limits must be shared across independent serverless function instances.
  */
 
 export interface CachedDocument {
@@ -25,11 +21,7 @@ export interface DocStore {
   evict(documentId: string): Promise<void>;
 }
 
-/* ------------------------------------------------------------------ */
-/* Redis backend                                                       */
-/* ------------------------------------------------------------------ */
-
-const REDIS_TTL_SECONDS = 60 * 60 * 6; // 6h rolling TTL for hot documents
+const REDIS_TTL_SECONDS = 60 * 60 * 6;
 const keyFor = (documentId: string) => `doc:${documentId}`;
 
 class RedisDocStore implements DocStore {
@@ -42,9 +34,7 @@ class RedisDocStore implements DocStore {
     if (!raw) return null;
     try {
       const parsed = JSON.parse(raw) as CachedDocument;
-      if (typeof parsed.content !== "string" || typeof parsed.revision !== "number") {
-        return null;
-      }
+      if (typeof parsed.content !== "string" || typeof parsed.revision !== "number") return null;
       return parsed;
     } catch {
       return null;
@@ -52,22 +42,13 @@ class RedisDocStore implements DocStore {
   }
 
   async set(documentId: string, value: CachedDocument): Promise<void> {
-    await this.redis.set(
-      keyFor(documentId),
-      JSON.stringify(value),
-      "EX",
-      REDIS_TTL_SECONDS,
-    );
+    await this.redis.set(keyFor(documentId), JSON.stringify(value), "EX", REDIS_TTL_SECONDS);
   }
 
   async evict(documentId: string): Promise<void> {
     await this.redis.del(keyFor(documentId));
   }
 }
-
-/* ------------------------------------------------------------------ */
-/* In-memory backend (single-process fallback)                         */
-/* ------------------------------------------------------------------ */
 
 class MemoryDocStore implements DocStore {
   readonly mode = "memory" as const;
@@ -86,57 +67,87 @@ class MemoryDocStore implements DocStore {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* Store resolution (singleton, lazy, fail-fast Redis probe)           */
-/* ------------------------------------------------------------------ */
-
 declare global {
   var __tandemDocStore: DocStore | undefined;
   var __tandemRedisClient: Redis | undefined;
 }
 
-async function probeRedis(url: string): Promise<Redis | null> {
-  const client = new Redis(url, {
+function redisOptions() {
+  return {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
-    connectTimeout: 900,
-    retryStrategy: () => null, // never storm a dead broker
+    connectTimeout: 1_500,
+    retryStrategy: () => null,
     enableOfflineQueue: false,
-  });
+  } as const;
+}
+
+async function createRedisClient(url: string): Promise<Redis> {
+  const client = new Redis(url, redisOptions());
   client.on("error", () => {
-    /* swallow — resolution falls back to memory */
+    /* callers handle probe failure; avoid noisy unhandled errors */
   });
+  await client.connect();
+  await client.ping();
+  return client;
+}
+
+export async function getRedisClient(options: { required?: boolean } = {}): Promise<Redis | null> {
+  if (globalThis.__tandemRedisClient?.status === "ready") return globalThis.__tandemRedisClient;
+
+  const url = process.env.REDIS_URL;
+  const required = options.required ?? productionRequiresRedis();
+  if (!url) {
+    if (required) {
+      throw new ConfigurationError(
+        "REDIS_URL is required for production realtime collaboration on Vercel. Configure a managed Redis/Valkey service and redeploy.",
+      );
+    }
+    return null;
+  }
+
   try {
-    await client.connect();
-    await client.ping();
+    const client = await createRedisClient(url);
+    globalThis.__tandemRedisClient = client;
     return client;
-  } catch {
-    client.disconnect();
+  } catch (err) {
+    if (required) {
+      throw new ConfigurationError(
+        "REDIS_URL is configured but unreachable. Production realtime collaboration requires a reachable managed Redis/Valkey service.",
+      );
+    }
+    console.warn("[store] REDIS_URL set but unreachable — falling back to in-memory cache", err);
     return null;
   }
 }
 
-export async function resolveDocStore(): Promise<DocStore> {
-  if (globalThis.__tandemDocStore) return globalThis.__tandemDocStore;
-
+export async function createRedisSubscriber(): Promise<Redis> {
   const url = process.env.REDIS_URL;
-  if (url) {
-    const redis = await probeRedis(url);
-    if (redis) {
-      globalThis.__tandemRedisClient = redis;
-      globalThis.__tandemDocStore = new RedisDocStore(redis);
+  if (!url) {
+    throw new ConfigurationError("REDIS_URL is required for realtime subscriptions.");
+  }
+  return createRedisClient(url);
+}
+
+export async function resolveDocStore(): Promise<DocStore> {
+  if (globalThis.__tandemDocStore) {
+    if (shouldUseRedisRealtime() && globalThis.__tandemDocStore.mode !== "redis") {
+      globalThis.__tandemDocStore = undefined;
+    } else {
       return globalThis.__tandemDocStore;
     }
-    console.warn(
-      `[store] REDIS_URL set but unreachable — falling back to in-memory cache`,
-    );
+  }
+
+  const redis = await getRedisClient({ required: shouldUseRedisRealtime() });
+  if (redis) {
+    globalThis.__tandemDocStore = new RedisDocStore(redis);
+    return globalThis.__tandemDocStore;
   }
 
   globalThis.__tandemDocStore = new MemoryDocStore();
   return globalThis.__tandemDocStore;
 }
 
-/** Synchronous accessor used by reporting endpoints after first resolution. */
 export function currentStore(): DocStore | null {
   return globalThis.__tandemDocStore ?? null;
 }
