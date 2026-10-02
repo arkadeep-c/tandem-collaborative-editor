@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, XCircle, Info, X } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { Check, XCircle, Info } from "lucide-react";
 
 export type ToastType = "success" | "error" | "info";
 
@@ -42,19 +43,29 @@ export function useToasts() {
 
 export default function ToastContainer() {
   const current = useToasts();
+  const reduceMotion = useReducedMotion();
+
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-[100] flex flex-col gap-2">
-      {current.map((toast) => (
-        <div
-          key={toast.id}
-          className="pointer-events-auto flex items-center gap-2 rounded-lg border border-white/10 bg-[#10141f] px-4 py-2.5 text-sm shadow-2xl"
-        >
-          {toast.type === "success" && <Check className="h-4 w-4 text-emerald-400" />}
-          {toast.type === "error" && <XCircle className="h-4 w-4 text-rose-400" />}
-          {toast.type === "info" && <Info className="h-4 w-4 text-slate-400" />}
-          <span className="text-slate-200">{toast.message}</span>
-        </div>
-      ))}
+    <div className="pointer-events-none fixed bottom-4 right-4 z-[100] flex max-w-[calc(100vw-2rem)] flex-col gap-2">
+      <AnimatePresence initial={false}>
+        {current.map((toast) => (
+          <motion.div
+            key={toast.id}
+            layout={!reduceMotion}
+            initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.98 }}
+            transition={{ duration: reduceMotion ? 0 : 0.22, ease: [0.22, 1, 0.36, 1] }}
+            className="premium-panel pointer-events-auto flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm"
+            role="status"
+          >
+            {toast.type === "success" && <Check className="h-4 w-4 text-emerald-300" />}
+            {toast.type === "error" && <XCircle className="h-4 w-4 text-rose-300" />}
+            {toast.type === "info" && <Info className="h-4 w-4 text-cyan-200" />}
+            <span className="text-slate-100">{toast.message}</span>
+          </motion.div>
+        ))}
+      </AnimatePresence>
     </div>
   );
 }

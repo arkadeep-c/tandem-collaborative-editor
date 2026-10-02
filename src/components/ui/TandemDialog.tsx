@@ -114,7 +114,7 @@ function DialogShell({
 
   return (
     <div
-      className="fixed inset-0 z-[90] flex items-center justify-center bg-[#07090f]/80 p-4 backdrop-blur-md"
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-[#050814]/82 p-4 backdrop-blur-xl"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
@@ -126,21 +126,21 @@ function DialogShell({
         aria-labelledby={titleId}
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#10141f] p-7 shadow-2xl shadow-black/60 outline-none ring-1 ring-white/[0.03]"
+        className="premium-panel premium-border w-full max-w-md rounded-3xl p-7 outline-none"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div
           className={clsx(
-            "mb-4 flex h-11 w-11 items-center justify-center rounded-xl",
+            "mb-4 flex h-11 w-11 items-center justify-center rounded-2xl shadow-[0_0_28px_rgba(34,211,238,0.08)]",
             tone === "destructive"
-              ? "bg-rose-500/15 text-rose-300 ring-1 ring-rose-300/20"
-              : "bg-teal-500/15 text-teal-300 ring-1 ring-teal-300/20",
+              ? "bg-rose-400/15 text-rose-200 ring-1 ring-rose-300/20"
+              : "bg-cyan-300/10 text-cyan-200 ring-1 ring-cyan-200/20",
           )}
           aria-hidden
         >
           {icon ?? fallbackIcon}
         </div>
-        <h2 id={titleId} className="text-lg font-semibold text-slate-100">
+        <h2 id={titleId} className="text-lg font-bold text-slate-50">
           {title}
         </h2>
         {description && (
@@ -221,7 +221,7 @@ export function InputDialog({
           placeholder={placeholder}
           maxLength={maxLength}
           disabled={busy}
-          className="w-full rounded-lg border border-white/10 bg-[#0b0e14] px-3.5 py-2.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/20 disabled:opacity-60"
+          className="w-full rounded-xl border border-white/10 bg-[#070c16] px-3.5 py-2.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-cyan-300/60 focus:ring-2 focus:ring-cyan-300/20 disabled:opacity-60"
         />
         {validationMessage && (
           <p className="mt-2 text-xs font-medium text-rose-200">{validationMessage}</p>
@@ -231,14 +231,14 @@ export function InputDialog({
             type="button"
             disabled={busy}
             onClick={onClose}
-            className="flex-1 rounded-lg border border-white/10 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/5 disabled:opacity-50"
+            className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-slate-300 transition hover:bg-white/[0.05] disabled:opacity-50"
           >
             {cancelLabel}
           </button>
           <button
             type="submit"
             disabled={disabled}
-            className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-teal-500 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-400 active:scale-[0.98] disabled:opacity-60"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-cyan-300 py-2.5 text-sm font-bold text-[#031018] transition hover:bg-cyan-200 active:scale-[0.98] disabled:opacity-60"
           >
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
             {confirmLabel}
@@ -298,7 +298,7 @@ export function ConfirmationDialog({
           type="button"
           disabled={busy}
           onClick={onClose}
-          className="flex-1 rounded-lg border border-white/10 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/5 disabled:opacity-50"
+          className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-slate-300 transition hover:bg-white/[0.05] disabled:opacity-50"
         >
           {cancelLabel}
         </button>
@@ -307,10 +307,10 @@ export function ConfirmationDialog({
           disabled={busy}
           onClick={() => void submit()}
           className={clsx(
-            "flex flex-1 items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold text-white transition active:scale-[0.98] disabled:opacity-60",
+            "flex flex-1 items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-bold transition active:scale-[0.98] disabled:opacity-60",
             tone === "destructive"
-              ? "bg-rose-500 hover:bg-rose-400"
-              : "bg-teal-500 hover:bg-teal-400",
+              ? "bg-rose-400 text-[#2a0d12] hover:bg-rose-300"
+              : "bg-cyan-300 text-[#031018] hover:bg-cyan-200",
           )}
         >
           {busy && <Loader2 className="h-4 w-4 animate-spin" />}

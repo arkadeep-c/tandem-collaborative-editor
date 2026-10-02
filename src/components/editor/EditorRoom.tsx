@@ -36,6 +36,7 @@ import OutputPanel from "@/components/editor/OutputPanel";
 import ProblemsPanel from "@/components/editor/ProblemsPanel";
 import { showToast } from "@/components/ui/Toast";
 import { ConfirmationDialog } from "@/components/ui/TandemDialog";
+import AmbientBackground from "@/components/visual/AmbientBackground";
 import { useCollaborativeDocument } from "@/lib/useCollaborativeDocument";
 import {
   LANGUAGE_OPTIONS,
@@ -761,13 +762,15 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
   };
 
   return (
-    <div className="relative flex h-screen flex-col overflow-hidden bg-[#07090f] text-slate-200">
+    <div className="relative flex h-screen flex-col overflow-hidden bg-[#050814] text-slate-200">
+      <AmbientBackground variant="editor" className="z-0" />
+      <div className="pointer-events-none absolute inset-0 z-0 bg-[linear-gradient(180deg,rgba(5,8,20,0.72),rgba(5,8,20,0.96)_42%,rgba(5,8,20,1))]" aria-hidden />
       {/* Header */}
-      <header className="flex h-14 shrink-0 items-center gap-3 overflow-x-auto border-b border-white/[0.06] bg-[#0b0e14]/90 px-4 backdrop-blur">
+      <header className="relative z-10 flex h-14 shrink-0 items-center gap-3 overflow-x-auto border-b border-white/[0.08] bg-[#08101c]/84 px-4 shadow-[0_8px_34px_rgba(0,0,0,0.22)] backdrop-blur-xl">
         <button
           type="button"
           onClick={exitRoom}
-          className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-white/20 hover:text-slate-100"
+          className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/[0.025] text-slate-400 transition hover:border-cyan-200/25 hover:bg-white/[0.06] hover:text-slate-100"
           aria-label="Back to rooms"
           title="Back to rooms"
         >
@@ -775,8 +778,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         </button>
 
         <div className="hidden leading-tight sm:block">
-          <div className="text-sm font-bold tracking-tight text-slate-100">Tandem</div>
-          <div className="font-mono text-[10px] tracking-[0.16em] text-teal-300/80">{room.code}</div>
+          <div className="text-sm font-bold tracking-tight text-slate-50">Tandem</div>
+          <div className="font-mono text-[10px] tracking-[0.16em] text-cyan-200/80">{room.code}</div>
         </div>
 
         <input
@@ -792,7 +795,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
           className={clsx(
             "w-36 truncate rounded-md border bg-transparent px-2 py-1 text-sm font-semibold text-slate-100 outline-none transition sm:w-56 md:w-72",
             isOwner
-              ? "border-transparent hover:border-white/10 focus:border-teal-400/50 focus:bg-[#0b0e14]"
+              ? "border-transparent hover:border-white/10 focus:border-cyan-300/50 focus:bg-[#08101c]"
               : "cursor-default border-transparent",
           )}
         />
@@ -826,8 +829,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
             className={clsx(
               "flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition",
               membersOpen
-                ? "border-teal-300/30 bg-teal-300/10 text-teal-100"
-                : "border-white/10 text-slate-300 hover:border-white/20 hover:bg-white/5",
+                ? "border-cyan-300/30 bg-cyan-300/10 text-cyan-100 shadow-[0_0_22px_rgba(34,211,238,0.08)]"
+                : "border-white/10 bg-white/[0.02] text-slate-300 hover:border-white/20 hover:bg-white/[0.06]",
             )}
             aria-expanded={membersOpen}
           >
@@ -851,7 +854,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               <select
                 value={state.language}
                 onChange={(event) => void updateMeta({ language: event.target.value })}
-                className="cursor-pointer appearance-none rounded-lg border border-white/10 bg-[#11151f] py-1.5 pl-3 pr-7 text-xs font-medium outline-none transition hover:border-white/20 focus:border-teal-400/50"
+                className="cursor-pointer appearance-none rounded-xl border border-white/10 bg-[#0a1220] py-1.5 pl-3 pr-7 text-xs font-semibold outline-none transition hover:border-white/20 focus:border-cyan-300/50"
                 style={{ color: languageAccent(state.language) }}
               >
                 {LANGUAGE_OPTIONS.map((option) => (
@@ -876,8 +879,10 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
               <button
                 onClick={running ? stopExecution : () => void runCode()}
                 className={clsx(
-                  "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition",
-                  running ? "bg-rose-500 hover:bg-rose-400" : "bg-emerald-500 hover:bg-emerald-400",
+                  "flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition shadow-lg",
+                  running
+                    ? "bg-rose-400 text-[#2a0d12] shadow-rose-950/20 hover:bg-rose-300"
+                    : "bg-emerald-300 text-[#04130c] shadow-emerald-950/20 hover:bg-emerald-200",
                 )}
                 title={running ? "Stop execution" : currentExecutionAvailability?.ready === false ? currentExecutionAvailability.reason : "Run code (Ctrl+Enter)"}
               >
@@ -978,7 +983,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       </header>
 
       {membersOpen && (
-        <div className="absolute right-4 top-14 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-white/10 bg-[#10141f] shadow-2xl shadow-black/50">
+        <div className="premium-panel premium-border absolute right-4 top-14 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-3xl">
           <div className="border-b border-white/[0.06] px-4 py-3">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
@@ -1095,9 +1100,9 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
         </div>
       )}
 
-      <nav className="shrink-0 border-b border-white/[0.06] bg-[#0a0d13] px-3 py-2">
+      <nav className="relative z-10 shrink-0 border-b border-white/[0.08] bg-[#070d18]/90 px-3 py-2 backdrop-blur-xl">
         <div className="flex overflow-x-auto">
-          <div className="inline-flex rounded-xl border border-white/10 bg-[#11151f] p-0.5">
+          <div className="inline-flex rounded-2xl border border-white/10 bg-[#0a1220]/95 p-0.5 shadow-inner shadow-black/20">
             {[
               { id: "edit", label: "Editor", disabled: false, kind: "view" },
               { id: "split", label: "Split", disabled: !hasCompanionPane, kind: "view" },
@@ -1121,8 +1126,8 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
                   className={clsx(
                     "min-w-0 shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 sm:px-3",
                     active
-                      ? "bg-teal-300/15 text-teal-100 shadow-[0_0_16px_rgba(45,212,191,0.08)]"
-                      : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-200",
+                      ? "bg-cyan-300/15 text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.10)]"
+                      : "text-slate-500 hover:bg-white/[0.05] hover:text-slate-200",
                   )}
                 >
                   <span>{label}</span>
@@ -1158,7 +1163,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       )}
 
       {showSettings && (
-        <div className="border-b border-white/[0.06] bg-[#0f131d] px-4 py-3">
+        <div className="relative z-10 border-b border-white/[0.08] bg-[#0b1220]/92 px-4 py-3 backdrop-blur-xl">
           <div className="flex flex-wrap items-center gap-4 text-xs">
             <label className="flex items-center gap-2">
               <span className="text-slate-400">Font size</span>
@@ -1181,7 +1186,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       )}
 
       {/* Workspace */}
-      <main className="flex min-h-0 flex-1 flex-col">
+      <main className="relative z-10 flex min-h-0 flex-1 flex-col">
         <div
           className={clsx(
             "flex min-h-0 flex-1",
@@ -1260,7 +1265,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
 
         {/* Bottom panels */}
         {bottomOpen && (
-          <div className="flex h-64 shrink-0 flex-col border-t border-white/[0.06] bg-[#0a0d13]">
+          <div className="flex h-64 shrink-0 flex-col border-t border-white/[0.08] bg-[#070d18]/96 shadow-[0_-18px_60px_rgba(0,0,0,0.24)] backdrop-blur-xl">
             <div className="flex items-center gap-2 border-b border-white/[0.06] px-3 py-2 text-xs font-semibold text-slate-400">
               <TerminalIcon className="h-3.5 w-3.5 text-cyan-200" />
               <span>{bottomTab === "output" ? "Output" : "Problems"}</span>
@@ -1284,7 +1289,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       </main>
 
       {/* Status bar */}
-      <footer className="flex h-8 shrink-0 items-center gap-4 border-t border-white/[0.06] bg-[#0b0e14] px-4 text-[11px] text-slate-500">
+      <footer className="relative z-10 flex h-8 shrink-0 items-center gap-4 border-t border-white/[0.08] bg-[#08101c]/92 px-4 text-[11px] text-slate-500 backdrop-blur-xl">
         <span className={clsx("flex items-center gap-1.5 font-medium", dirty ? "text-amber-300/90" : "text-emerald-300/90")}>
           {dirty ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
           {dirty ? "Syncing…" : "Saved"}

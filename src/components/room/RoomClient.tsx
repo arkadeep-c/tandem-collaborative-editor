@@ -7,6 +7,7 @@ import JoinGate from "@/components/room/JoinGate";
 import { apiFetch, ensureClientSession, getAuthDiagnostics, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
 import type { ClientUser, RoomRole, RoomTemplateMode } from "@/lib/types";
 import { Loader2 } from "lucide-react";
+import AmbientBackground from "@/components/visual/AmbientBackground";
 
 interface RoomClientProps {
   code: string;
@@ -105,9 +106,10 @@ export default function RoomClient({ code }: RoomClientProps) {
 
   if (status === "loading") {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#07090f]">
-        <div className="flex items-center gap-3 text-sm text-slate-500">
-          <Loader2 className="h-4 w-4 animate-spin text-teal-400" />
+      <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#050814]">
+        <AmbientBackground variant="home" />
+        <div className="premium-panel relative z-10 flex items-center gap-3 rounded-2xl px-5 py-4 text-sm text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
           Loading room…
         </div>
       </div>
@@ -116,23 +118,26 @@ export default function RoomClient({ code }: RoomClientProps) {
 
   if (status === "not-found") {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center bg-[#07090f] px-6 text-center">
-        <p className="font-mono text-sm tracking-[0.3em] text-teal-300">
-          {code || "??????"}
-        </p>
-        <h1 className="mt-4 text-3xl font-bold tracking-tight text-slate-50">
-          Room not found.
-        </h1>
-        <p className="mt-3 max-w-sm text-sm leading-relaxed text-slate-400">
-          {error ?? "That code doesn't match any room."}
-        </p>
-        <div className="mt-8 flex gap-3">
-          <Link
-            href="/"
-            className="rounded-lg bg-teal-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-400"
-          >
-            Back home
-          </Link>
+      <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-[#050814] px-6 text-center">
+        <AmbientBackground variant="home" />
+        <div className="premium-panel premium-border relative z-10 max-w-md rounded-3xl p-8">
+          <p className="font-mono text-sm tracking-[0.3em] text-cyan-200">
+            {code || "??????"}
+          </p>
+          <h1 className="mt-4 text-3xl font-bold tracking-tight text-slate-50">
+            Room not found.
+          </h1>
+          <p className="mt-3 max-w-sm text-sm leading-relaxed text-slate-400">
+            {error ?? "That code doesn't match any room."}
+          </p>
+          <div className="mt-8 flex justify-center gap-3">
+            <Link
+              href="/"
+              className="rounded-xl bg-cyan-300 px-5 py-2.5 text-sm font-bold text-[#031018] transition hover:bg-cyan-200"
+            >
+              Back home
+            </Link>
+          </div>
         </div>
       </div>
     );
@@ -154,9 +159,10 @@ export default function RoomClient({ code }: RoomClientProps) {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#07090f]">
-      <div className="flex items-center gap-3 text-sm text-slate-500">
-        <Loader2 className="h-4 w-4 animate-spin text-teal-400" />
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#050814]">
+      <AmbientBackground variant="home" />
+      <div className="premium-panel relative z-10 flex items-center gap-3 rounded-2xl px-5 py-4 text-sm text-slate-400">
+        <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
         Loading…
       </div>
     </div>

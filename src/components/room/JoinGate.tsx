@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Loader2, Users } from "lucide-react";
 import { languageAccent } from "@/lib/types";
 import { apiFetch, ensureClientSession, getStoredToken, handleSessionResponse } from "@/lib/apiFetch";
+import AmbientBackground from "@/components/visual/AmbientBackground";
 
 interface JoinGateProps {
   code: string;
@@ -92,12 +93,14 @@ export default function JoinGate({ code, title, language, onJoined }: JoinGatePr
   }, [code, router, onJoined]);
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-[#07090f] px-6">
-      <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#10141f] p-8 text-center shadow-2xl shadow-black/50">
-        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-teal-500/15 text-teal-300">
+    <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-[#050814] px-6 text-slate-100">
+      <AmbientBackground variant="home" />
+      <div className="pointer-events-none absolute inset-0 bg-[#050814]/55" aria-hidden />
+      <div className="premium-panel premium-border relative z-10 w-full max-w-sm rounded-3xl p-8 text-center">
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-300/10 text-cyan-200 ring-1 ring-cyan-200/20">
           <Users className="h-5 w-5" />
         </div>
-        <p className="font-mono text-xs tracking-[0.3em] text-teal-300">
+        <p className="font-mono text-xs tracking-[0.3em] text-cyan-200">
           {code}
         </p>
         <h1 className="mt-3 text-xl font-bold tracking-tight text-slate-50">
@@ -126,7 +129,7 @@ export default function JoinGate({ code, title, language, onJoined }: JoinGatePr
           type="button"
           disabled={joining}
           onClick={() => void join()}
-          className="mt-7 flex w-full items-center justify-center gap-2 rounded-lg bg-teal-500 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-400 active:scale-[0.98] disabled:opacity-60"
+          className="mt-7 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-300 py-2.5 text-sm font-bold text-[#031018] transition hover:bg-cyan-200 active:scale-[0.98] disabled:opacity-60"
         >
           {joining && <Loader2 className="h-4 w-4 animate-spin" />}
           {joining ? "Joining…" : "Join room"}
