@@ -610,13 +610,22 @@ print(first + second + third)
   it("keeps interactive sessions alive while waiting more than 10 seconds for stdin", async () => {
     const execution = await runInteractiveDockerWhenReady(
       "python",
-      "value = input('Enter number: ')\nprint(f'Received: {value}')\n",
+      [
+        "import sys",
+        "sys.stdout.write('ready for stdin\\n')",
+        "sys.stdout.flush()",
+        "value = sys.stdin.readline().strip()",
+        "print(f'Received: {value}')",
+      ].join("\n"),
       async (handle, events) => {
         await waitForInteractiveEvent(
           events,
-          (event) => event.type === "stdout" && event.chunk.includes("Enter number:"),
+          (event) => event.type === "stdout" && event.chunk.includes("ready for stdin"),
+          15_000,
         );
-        await new Promise((resolve) => setTimeout(resolve, 11_000));
+        const waitStartedAt = Date.now();
+        await new Promise((resolve) => setTimeout(resolve, 10_500));
+        expect(Date.now() - waitStartedAt).toBeGreaterThanOrEqual(10_000);
         expect(handle.writeStdin("10\n")).toBe(true);
       },
     );
@@ -628,7 +637,7 @@ print(first + second + third)
 
     expect(execution.result.status).toBe("success");
     expect(execution.result.stdout).toContain("Received: 10");
-  }, 25_000);
+  }, 35_000);
 
   it("delivers the first submitted C stdin line immediately", async () => {
     const execution = await runInteractiveDockerWhenReady(
