@@ -9,6 +9,7 @@ import {
   createInteractiveTerminalCommand,
   executeCode,
   EXECUTION_TIMEOUT_MS,
+  OUTPUT_LIMIT_BYTES,
   getExecutionAvailability,
   getExecutionTimeoutMs,
   INTERACTIVE_TERMINAL_WRAPPER,
@@ -35,10 +36,13 @@ import {
   isExecutionLanguage,
   LANGUAGE_CONFIG,
   type ExecutionLanguage,
+  type ExecutionResult,
   type ExecutionStreamEvent,
 } from "@/lib/execution/types";
 import {
+  getActiveExecutionId,
   startExecutionSession,
+  stopExecutionSession,
   writeExecutionStdin,
 } from "@/lib/execution/interactiveSessions";
 import { LANGUAGE_OPTIONS } from "@/lib/types";
@@ -114,6 +118,109 @@ async function runJavaWhenAvailable(code: string, stdin?: string) {
   const availability = await javaAvailability();
   if (!availability.ready) return { skipped: true as const, availability };
   return { skipped: false as const, result: await executeCode("java", code, stdin) };
+}
+
+async function requireDockerReadyForTest(): Promise<boolean> {
+  if (await dockerExecutionReady()) return true;
+  expect(await dockerExecutionReady()).toBe(false);
+  return false;
+}
+
+type DockerCase = {
+  language: ExecutionLanguage;
+  code: string;
+  stdin?: string;
+  stdout?: string | RegExp;
+  stderr?: string | RegExp;
+  status?: ExecutionResult["status"];
+  exitCode?: number | null;
+};
+
+function expectText(actual: string, expected: string | RegExp, label: string) {
+  if (typeof expected === "string") {
+    expect(actual, label).toBe(expected);
+    return;
+  }
+
+  expect(actual, label).toMatch(expected);
+}
+
+async function runDockerCase(testCase: DockerCase): Promise<ExecutionResult | null> {
+  const execution = await runDockerWhenReady(
+    testCase.language,
+    testCase.code,
+    testCase.stdin,
+  );
+
+  expect(execution.skipped, testCase.language).toBe(false);
+  if (execution.skipped) return null;
+
+  expect(execution.result.status, testCase.language).toBe(testCase.status ?? "success");
+
+  if (testCase.stdout !== undefined) {
+    expectText(execution.result.stdout.trim(), testCase.stdout, `${testCase.language} stdout`);
+  }
+
+  if (testCase.stderr !== undefined) {
+    expectText(execution.result.stderr.trim(), testCase.stderr, `${testCase.language} stderr`);
+  }
+
+  if (testCase.exitCode !== undefined) {
+    expect(execution.result.exitCode, `${testCase.language} exitCode`).toBe(testCase.exitCode);
+  }
+
+  return execution.result;
+}
+
+function repeatedOutputCases(byteCount: number): DockerCase[] {
+  const jsCode = `process.stdout.write("x".repeat(${byteCount}));\n`;
+  const bashChunk = "x".repeat(1024);
+  const bashFullChunks = Math.floor(byteCount / 1024);
+  const bashRemainder = byteCount % 1024;
+
+  return [
+    {
+      language: "c",
+      code: `#include <stdio.h>
+int main(void) { for (int i = 0; i < ${byteCount}; i++) putchar('x'); return 0; }
+`,
+    },
+    {
+      language: "cpp",
+      code: `#include <iostream>
+int main() { for (int i = 0; i < ${byteCount}; i++) std::cout.put('x'); return 0; }
+`,
+    },
+    {
+      language: "java",
+      code: `import java.util.Arrays;
+public class Main {
+  public static void main(String[] args) {
+    char[] chunk = new char[1024];
+    Arrays.fill(chunk, 'x');
+    String value = new String(chunk);
+    int fullChunks = ${Math.floor(byteCount / 1024)};
+    int remainder = ${byteCount % 1024};
+    for (int i = 0; i < fullChunks; i++) System.out.print(value);
+    for (int i = 0; i < remainder; i++) System.out.print('x');
+  }
+}
+`,
+    },
+    { language: "python", code: `import sys
+sys.stdout.write("x" * ${byteCount})
+sys.stdout.flush()
+` },
+    { language: "javascript", code: jsCode },
+    { language: "typescript", code: jsCode },
+    {
+      language: "bash",
+      code: `chunk='${bashChunk}'
+for ((i=0; i<${bashFullChunks}; i++)); do printf "%s" "$chunk"; done
+if [ ${bashRemainder} -gt 0 ]; then printf "%.*s" ${bashRemainder} "$chunk"; fi
+`,
+    },
+  ];
 }
 
 describe("execution language registry", () => {
@@ -920,6 +1027,648 @@ int main(void) {
       await session.done.catch(() => undefined);
     }
   });
+});
+
+describe("Docker-backed execution audit matrix", () => {
+  it("runs deterministic successful programs for every executable language", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    const cases: DockerCase[] = [
+      {
+        language: "c",
+        code: `#include <stdio.h>
+int main(void) { printf("c-basic:%d\\n", 6 * 7); return 0; }
+`,
+        stdout: "c-basic:42",
+        stderr: "",
+        exitCode: 0,
+      },
+      {
+        language: "cpp",
+        code: `#include <iostream>
+int main() { std::cout << "cpp-basic:" << (6 * 7) << std::endl; return 0; }
+`,
+        stdout: "cpp-basic:42",
+        stderr: "",
+        exitCode: 0,
+      },
+      {
+        language: "java",
+        code: `public class Main {
+  public static void main(String[] args) { System.out.println("java-basic:" + (6 * 7)); }
+}
+`,
+        stdout: "java-basic:42",
+        stderr: "",
+        exitCode: 0,
+      },
+      { language: "python", code: "print(f'python-basic:{6 * 7}')\n", stdout: "python-basic:42", stderr: "", exitCode: 0 },
+      { language: "javascript", code: "console.log(`js-basic:${6 * 7}`);\n", stdout: "js-basic:42", stderr: "", exitCode: 0 },
+      { language: "typescript", code: "const value: number = 6 * 7;\nconsole.log(`ts-basic:${value}`);\n", stdout: "ts-basic:42", stderr: "", exitCode: 0 },
+      { language: "bash", code: "echo \"bash-basic:$((6 * 7))\"\n", stdout: "bash-basic:42", stderr: "", exitCode: 0 },
+    ];
+
+    for (const testCase of cases) {
+      await runDockerCase(testCase);
+    }
+  }, 90_000);
+
+  it("handles stdin whitespace, multiple lines, numbers, strings, empty input, EOF, and invalid values", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    const structuredInput = "Ada Lovelace\n21 token\n";
+    const structuredCases: DockerCase[] = [
+      {
+        language: "c",
+        stdin: structuredInput,
+        code: `#include <stdio.h>
+#include <string.h>
+int main(void) {
+  char name[80] = {0};
+  char word[80] = {0};
+  int value = 0;
+  if (!fgets(name, sizeof(name), stdin)) return 2;
+  name[strcspn(name, "\\n")] = 0;
+  if (scanf("%d %79s", &value, word) != 2) return 3;
+  printf("name=%s;number=%d;word=%s\\n", name, value * 2, word);
+  return 0;
+}
+`,
+        stdout: "name=Ada Lovelace;number=42;word=token",
+      },
+      {
+        language: "cpp",
+        stdin: structuredInput,
+        code: `#include <iostream>
+#include <string>
+int main() {
+  std::string name, word;
+  int value = 0;
+  std::getline(std::cin, name);
+  std::cin >> value >> word;
+  std::cout << "name=" << name << ";number=" << value * 2 << ";word=" << word << std::endl;
+  return 0;
+}
+`,
+        stdout: "name=Ada Lovelace;number=42;word=token",
+      },
+      {
+        language: "java",
+        stdin: structuredInput,
+        code: `import java.util.Scanner;
+public class Main {
+  public static void main(String[] args) {
+    Scanner sc = new Scanner(System.in);
+    String name = sc.nextLine();
+    int value = sc.nextInt();
+    String word = sc.next();
+    System.out.println("name=" + name + ";number=" + (value * 2) + ";word=" + word);
+  }
+}
+`,
+        stdout: "name=Ada Lovelace;number=42;word=token",
+      },
+      {
+        language: "python",
+        stdin: structuredInput,
+        code: `name = input()
+value, word = input().split()
+print(f"name={name};number={int(value) * 2};word={word}")
+`,
+        stdout: "name=Ada Lovelace;number=42;word=token",
+      },
+      {
+        language: "javascript",
+        stdin: structuredInput,
+        code: `const fs = require("fs");
+const [name, rest] = fs.readFileSync(0, "utf8").trimEnd().split(/\n/);
+const [value, word] = rest.split(/\s+/);
+console.log(` + "`name=${name};number=${Number(value) * 2};word=${word}`" + `);
+`,
+        stdout: "name=Ada Lovelace;number=42;word=token",
+      },
+      {
+        language: "typescript",
+        stdin: structuredInput,
+        code: `const fs = require("fs");
+const [name, rest] = fs.readFileSync(0, "utf8").trimEnd().split(/\n/);
+const [value, word] = rest.split(/\s+/);
+console.log(` + "`name=${name};number=${Number(value) * 2};word=${word}`" + `);
+`,
+        stdout: "name=Ada Lovelace;number=42;word=token",
+      },
+      {
+        language: "bash",
+        stdin: structuredInput,
+        code: `read -r name
+read -r value word
+echo "name=$name;number=$((value * 2));word=$word"
+`,
+        stdout: "name=Ada Lovelace;number=42;word=token",
+      },
+    ];
+
+    for (const testCase of structuredCases) {
+      await runDockerCase(testCase);
+    }
+
+    const eofCases: DockerCase[] = [
+      { language: "c", stdin: "", code: `#include <stdio.h>
+int main(void) { int value = 123; int rc = scanf("%d", &value); printf("eof=%d;value=%d\\n", rc == EOF, value); return 0; }
+`, stdout: "eof=1;value=123" },
+      { language: "cpp", stdin: "", code: `#include <iostream>
+int main() { int value = 123; std::cout << "eof=" << (!(std::cin >> value)) << ";value=" << value << std::endl; return 0; }
+`, stdout: "eof=1;value=123" },
+      { language: "java", stdin: "", code: `import java.util.Scanner;
+public class Main { public static void main(String[] args) { Scanner sc = new Scanner(System.in); System.out.println("eof=" + (!sc.hasNext()) + ";value=123"); } }
+`, stdout: "eof=true;value=123" },
+      { language: "python", stdin: "", code: "import sys\nprint(f'eof={sys.stdin.read() == \"\"};value=123')\n", stdout: "eof=True;value=123" },
+      { language: "javascript", stdin: "", code: "const fs = require('fs'); const data = fs.readFileSync(0, 'utf8'); console.log(`eof=${data.length === 0};value=123`);\n", stdout: "eof=true;value=123" },
+      { language: "typescript", stdin: "", code: "const fs = require('fs'); const data = fs.readFileSync(0, 'utf8'); console.log(`eof=${data.length === 0};value=123`);\n", stdout: "eof=true;value=123" },
+      { language: "bash", stdin: "", code: "if read -r value; then echo \"eof=false;value=$value\"; else echo \"eof=true;value=123\"; fi\n", stdout: "eof=true;value=123" },
+    ];
+
+    for (const testCase of eofCases) {
+      await runDockerCase(testCase);
+    }
+
+    const invalidInputCases: DockerCase[] = [
+      { language: "c", stdin: "not-a-number\n", code: `#include <stdio.h>
+int main(void) { int value = 0; if (scanf("%d", &value) != 1) puts("invalid"); else printf("valid:%d\\n", value); return 0; }
+`, stdout: "invalid" },
+      { language: "cpp", stdin: "not-a-number\n", code: `#include <iostream>
+int main() { int value = 0; if (!(std::cin >> value)) std::cout << "invalid" << std::endl; else std::cout << "valid:" << value << std::endl; return 0; }
+`, stdout: "invalid" },
+      { language: "java", stdin: "not-a-number\n", code: `import java.util.Scanner;
+public class Main { public static void main(String[] args) { Scanner sc = new Scanner(System.in); System.out.println(sc.hasNextInt() ? "valid:" + sc.nextInt() : "invalid"); } }
+`, stdout: "invalid" },
+      { language: "python", stdin: "not-a-number\n", code: "try:\n    print(f'valid:{int(input())}')\nexcept ValueError:\n    print('invalid')\n", stdout: "invalid" },
+      { language: "javascript", stdin: "not-a-number\n", code: "const fs = require('fs'); const value = Number(fs.readFileSync(0, 'utf8').trim()); console.log(Number.isFinite(value) ? `valid:${value}` : 'invalid');\n", stdout: "invalid" },
+      { language: "typescript", stdin: "not-a-number\n", code: "const fs = require('fs'); const value: number = Number(fs.readFileSync(0, 'utf8').trim()); console.log(Number.isFinite(value) ? `valid:${value}` : 'invalid');\n", stdout: "invalid" },
+      { language: "bash", stdin: "not-a-number\n", code: "read -r value\nif [[ $value =~ ^-?[0-9]+$ ]]; then echo \"valid:$value\"; else echo invalid; fi\n", stdout: "invalid" },
+    ];
+
+    for (const testCase of invalidInputCases) {
+      await runDockerCase(testCase);
+    }
+  }, 120_000);
+
+  it("surfaces syntax, compilation, runtime, stderr, and explicit non-zero failures then recovers", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    const failureCases: DockerCase[] = [
+      { language: "c", code: "int main(void) { return }\n", status: "compile_error", stderr: /error/i },
+      { language: "cpp", code: "int main() { return }\n", status: "compile_error", stderr: /error/i },
+      { language: "java", code: "public class Main { public static void main(String[] args) { System.out.println( } }\n", status: "compile_error", stderr: /error/i },
+      { language: "python", code: "if True print('missing colon')\n", status: "runtime_error", stderr: /SyntaxError/ },
+      { language: "javascript", code: "function nope( {\n", status: "runtime_error", stderr: /SyntaxError/ },
+      { language: "typescript", code: "const value: = 1;\n", status: "compile_error", stderr: /error/i },
+      { language: "bash", code: "if true; then echo missing\n", status: "runtime_error", stderr: /syntax error/i },
+      { language: "c", code: `#include <stdio.h>
+int main(void) { fprintf(stderr, "c-stderr\\n"); return 7; }
+`, status: "runtime_error", stderr: "c-stderr", exitCode: 7 },
+      { language: "cpp", code: `#include <stdexcept>
+int main() { throw std::runtime_error("cpp-boom"); }
+`, status: "runtime_error", stderr: /cpp-boom/ },
+      { language: "java", code: `public class Main { public static void main(String[] args) { throw new RuntimeException("java-boom"); } }
+`, status: "runtime_error", stderr: /java-boom/ },
+      { language: "python", code: "import sys\nprint('py-stderr', file=sys.stderr)\nsys.exit(7)\n", status: "runtime_error", stderr: "py-stderr", exitCode: 7 },
+      { language: "javascript", code: "console.error('js-stderr'); process.exit(7);\n", status: "runtime_error", stderr: "js-stderr", exitCode: 7 },
+      { language: "typescript", code: "console.error('ts-stderr'); process.exit(7);\n", status: "runtime_error", stderr: "ts-stderr", exitCode: 7 },
+      { language: "bash", code: "echo bash-stderr >&2\nexit 7\n", status: "runtime_error", stderr: "bash-stderr", exitCode: 7 },
+    ];
+
+    const recoveryCode: Record<ExecutionLanguage, string> = {
+      c: `#include <stdio.h>
+int main(void) { puts("recovered"); return 0; }
+`,
+      cpp: `#include <iostream>
+int main() { std::cout << "recovered" << std::endl; return 0; }
+`,
+      java: `public class Main { public static void main(String[] args) { System.out.println("recovered"); } }
+`,
+      python: "print('recovered')\n",
+      javascript: "console.log('recovered');\n",
+      typescript: "console.log('recovered');\n",
+      bash: "echo recovered\n",
+    };
+
+    for (const testCase of failureCases) {
+      const result = await runDockerCase(testCase);
+      expect(result?.status).not.toBe("success");
+
+      await runDockerCase({
+        language: testCase.language,
+        code: recoveryCode[testCase.language],
+        stdout: "recovered",
+        stderr: "",
+        exitCode: 0,
+      });
+    }
+  }, 180_000);
+
+  it("covers language-specific supported features and bounded computational work", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    const cases: DockerCase[] = [
+      {
+        language: "c",
+        code: `#include <stdio.h>
+#include <stdlib.h>
+typedef struct { int left; int right; } Pair;
+int main(void) {
+  Pair *pair = malloc(sizeof(Pair));
+  if (!pair) return 2;
+  pair->left = 19;
+  pair->right = 23;
+  long total = 0;
+  for (int i = 0; i < 10000; i++) total += i;
+  printf("c-feature:%d:%ld\\n", pair->left + pair->right, total);
+  free(pair);
+  return 0;
+}
+`,
+        stdout: "c-feature:42:49995000",
+      },
+      {
+        language: "cpp",
+        code: `#include <algorithm>
+#include <atomic>
+#include <iostream>
+#include <thread>
+#include <vector>
+int main() {
+  std::vector<int> values = {5, 1, 3, 2, 4};
+  std::sort(values.begin(), values.end());
+  std::atomic<int> total{0};
+  std::thread left([&] { for (int i = 0; i < 21; i++) total.fetch_add(1); });
+  std::thread right([&] { for (int i = 0; i < 21; i++) total.fetch_add(1); });
+  left.join();
+  right.join();
+  std::cout << "cpp-feature:" << values.front() << values.back() << ":" << total.load() << std::endl;
+  return 0;
+}
+`,
+        stdout: "cpp-feature:15:42",
+      },
+      {
+        language: "java",
+        code: `import java.util.*;
+import java.util.concurrent.*;
+public class Main {
+  public static void main(String[] args) throws Exception {
+    List<Integer> values = new ArrayList<>(Arrays.asList(5, 1, 3, 2, 4));
+    Collections.sort(values);
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    Future<Integer> left = pool.submit(() -> 21);
+    Future<Integer> right = pool.submit(() -> 21);
+    int total = left.get() + right.get();
+    pool.shutdown();
+    System.out.println("java-feature:" + values.get(0) + values.get(4) + ":" + total);
+  }
+}
+`,
+        stdout: "java-feature:15:42",
+      },
+      { language: "python", code: "total = sum(i * i for i in range(50))\nprint(f'python-feature:✓:{total}')\n", stdout: "python-feature:✓:40425" },
+      { language: "javascript", code: "Promise.resolve(21).then((value) => console.log(`js-feature:${value * 2}`));\n", stdout: "js-feature:42" },
+      { language: "typescript", code: "interface Item { value: number }\nconst item: Item = { value: 21 };\nPromise.resolve(item.value).then((value) => console.log(`ts-feature:${value * 2}`));\n", stdout: "ts-feature:42" },
+      { language: "bash", code: "total=0\nwhile read -r value; do total=$((total + value)); done < <(printf '3\\n1\\n2\\n' | sort -n)\necho \"bash-feature:$total\"\n", stdout: "bash-feature:6" },
+    ];
+
+    for (const testCase of cases) {
+      await runDockerCase(testCase);
+    }
+  }, 120_000);
+
+  it("supports interactive prompts, sequential lines, and rapid stdin for every language", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    const nodeInteractive = `const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+const values = [];
+process.stdout.write("Enter number: ");
+rl.on("line", (line) => {
+  values.push(Number(line.trim()));
+  if (values.length === 1) process.stdout.write("Next: ");
+  if (values.length === 4) {
+    console.log(` + "`total=${values.reduce((sum, value) => sum + value, 0)}`" + `);
+    rl.close();
+  }
+});
+`;
+
+    const cases: Array<{ language: ExecutionLanguage; code: string }> = [
+      {
+        language: "c",
+        code: `#include <stdio.h>
+int main(void) {
+  int a, b, c, d;
+  printf("Enter number: ");
+  fflush(stdout);
+  if (scanf("%d", &a) != 1) return 2;
+  printf("Next: ");
+  fflush(stdout);
+  if (scanf("%d %d %d", &b, &c, &d) != 3) return 3;
+  printf("total=%d\\n", a + b + c + d);
+  return 0;
+}
+`,
+      },
+      {
+        language: "cpp",
+        code: `#include <iostream>
+int main() {
+  int a, b, c, d;
+  std::cout << "Enter number: " << std::flush;
+  if (!(std::cin >> a)) return 2;
+  std::cout << "Next: " << std::flush;
+  if (!(std::cin >> b >> c >> d)) return 3;
+  std::cout << "total=" << (a + b + c + d) << std::endl;
+  return 0;
+}
+`,
+      },
+      {
+        language: "java",
+        code: `import java.util.Scanner;
+public class Main {
+  public static void main(String[] args) {
+    Scanner sc = new Scanner(System.in);
+    System.out.print("Enter number: ");
+    System.out.flush();
+    int a = sc.nextInt();
+    System.out.print("Next: ");
+    System.out.flush();
+    int b = sc.nextInt();
+    int c = sc.nextInt();
+    int d = sc.nextInt();
+    System.out.println("total=" + (a + b + c + d));
+  }
+}
+`,
+      },
+      {
+        language: "python",
+        code: `import sys
+print("Enter number: ", end="", flush=True)
+a = int(sys.stdin.readline())
+print("Next: ", end="", flush=True)
+b = int(sys.stdin.readline())
+c = int(sys.stdin.readline())
+d = int(sys.stdin.readline())
+print(f"total={a + b + c + d}")
+`,
+      },
+      { language: "javascript", code: nodeInteractive },
+      { language: "typescript", code: nodeInteractive },
+      {
+        language: "bash",
+        code: `printf "Enter number: "
+read -r a
+printf "Next: "
+read -r b
+read -r c
+read -r d
+echo "total=$((a + b + c + d))"
+`,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const execution = await runInteractiveDockerWhenReady(
+        testCase.language,
+        testCase.code,
+        async (handle, events) => {
+          await waitForInteractiveEvent(
+            events,
+            (event) => event.type === "stdout" && event.chunk.includes("Enter number:"),
+            15_000,
+          );
+          expect(events.some((event) => event.type === "stdout" && event.chunk.includes("total=")), testCase.language).toBe(false);
+          expect(handle.writeStdin("2\n"), testCase.language).toBe(true);
+          await waitForInteractiveEvent(
+            events,
+            (event) => event.type === "stdout" && event.chunk.includes("Next:"),
+            15_000,
+          );
+          expect(handle.writeStdin("3\n4\n5\n"), testCase.language).toBe(true);
+        },
+      );
+
+      expect(execution.skipped, testCase.language).toBe(false);
+      if (execution.skipped) continue;
+      expect(execution.result.status, testCase.language).toBe("success");
+      expect(execution.result.stdout, testCase.language).toContain("Enter number:");
+      expect(execution.result.stdout, testCase.language).toContain("Next:");
+      expect(execution.result.stdout, testCase.language).toContain("total=14");
+    }
+  }, 180_000);
+
+  it("preserves ordered high-volume output and valid near-limit output for every language", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    const orderedCases: DockerCase[] = [
+      { language: "c", code: `#include <stdio.h>
+int main(void) { for (int i = 0; i < 2000; i++) printf("L%04d\\n", i); return 0; }
+` },
+      { language: "cpp", code: `#include <iomanip>
+#include <iostream>
+int main() { for (int i = 0; i < 2000; i++) std::cout << "L" << std::setw(4) << std::setfill('0') << i << "\\n"; return 0; }
+` },
+      { language: "java", code: `public class Main { public static void main(String[] args) { for (int i = 0; i < 2000; i++) System.out.printf("L%04d%n", i); } }
+` },
+      { language: "python", code: "for i in range(2000):\n    print(f'L{i:04d}')\n" },
+      { language: "javascript", code: "for (let i = 0; i < 2000; i++) console.log(`L${String(i).padStart(4, '0')}`);\n" },
+      { language: "typescript", code: "for (let i = 0; i < 2000; i++) console.log(`L${String(i).padStart(4, '0')}`);\n" },
+      { language: "bash", code: "for ((i=0; i<2000; i++)); do printf 'L%04d\\n' \"$i\"; done\n" },
+    ];
+
+    for (const testCase of orderedCases) {
+      const result = await runDockerCase({ ...testCase, status: "success", stderr: "", exitCode: 0 });
+      if (!result) continue;
+      const lines = result.stdout.trim().split("\n");
+      expect(lines.length, testCase.language).toBe(2000);
+      expect(lines[0], testCase.language).toBe("L0000");
+      expect(lines[1999], testCase.language).toBe("L1999");
+    }
+
+    for (const testCase of repeatedOutputCases(OUTPUT_LIMIT_BYTES - 4096)) {
+      const result = await runDockerCase({ ...testCase, status: "success", stderr: "", exitCode: 0 });
+      if (!result) continue;
+      expect(result.stdout.length, testCase.language).toBe(OUTPUT_LIMIT_BYTES - 4096);
+      expect(result.outputTruncated, testCase.language).not.toBe(true);
+    }
+  }, 180_000);
+
+  it("enforces the output limit for every language and recovers afterward", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    for (const testCase of repeatedOutputCases(OUTPUT_LIMIT_BYTES + 4096)) {
+      const result = await runDockerCase({ ...testCase, status: "output_limit" });
+      if (!result) continue;
+      expect(result.outputTruncated, testCase.language).toBe(true);
+      expect(result.stdout, testCase.language).toContain("[Output truncated: exceeded 1MB limit]");
+
+      await runDockerCase({
+        language: testCase.language,
+        code: {
+          c: `#include <stdio.h>
+int main(void) { puts("after-limit"); return 0; }
+`,
+          cpp: `#include <iostream>
+int main() { std::cout << "after-limit" << std::endl; return 0; }
+`,
+          java: `public class Main { public static void main(String[] args) { System.out.println("after-limit"); } }
+`,
+          python: "print('after-limit')\n",
+          javascript: "console.log('after-limit');\n",
+          typescript: "console.log('after-limit');\n",
+          bash: "echo after-limit\n",
+        }[testCase.language],
+        stdout: "after-limit",
+        stderr: "",
+        exitCode: 0,
+      });
+    }
+  }, 180_000);
+
+  it("keeps Docker sandbox runtime restrictions intact", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    await runDockerCase({
+      language: "bash",
+      code: "echo uid=$(id -u)\necho gid=$(id -g)\necho nproc=$(ulimit -u)\necho file=$(ulimit -f)\n",
+      stdout: /uid=65534\ngid=65534\nnproc=96\nfile=4096/,
+      stderr: "",
+      exitCode: 0,
+    });
+
+    await runDockerCase({
+      language: "python",
+      code: `from pathlib import Path
+Path('/workspace/workspace-write.txt').write_text('ok')
+print(Path('/workspace/workspace-write.txt').read_text())
+`,
+      stdout: "ok",
+      stderr: "",
+      exitCode: 0,
+    });
+
+    await runDockerCase({
+      language: "python",
+      code: `from pathlib import Path
+try:
+    Path('/etc/tandem-denied').write_text('x')
+except OSError as exc:
+    print(type(exc).__name__)
+else:
+    raise SystemExit(9)
+`,
+      stdout: /OSError|PermissionError/,
+      stderr: "",
+      exitCode: 0,
+    });
+
+    await runDockerCase({
+      language: "bash",
+      code: `cat > /tmp/tandem-noexec.sh <<'SCRIPT'
+echo should-not-run
+SCRIPT
+chmod +x /tmp/tandem-noexec.sh
+if /tmp/tandem-noexec.sh >/tmp/noexec.out 2>/tmp/noexec.err; then
+  echo noexec-bypassed
+  exit 9
+fi
+echo noexec-enforced
+`,
+      stdout: "noexec-enforced",
+      exitCode: 0,
+    });
+
+    await runDockerCase({
+      language: "python",
+      code: `import socket
+sock = socket.socket()
+sock.settimeout(1)
+try:
+    sock.connect(("1.1.1.1", 80))
+except OSError as exc:
+    print(type(exc).__name__)
+else:
+    raise SystemExit(9)
+`,
+      stdout: /OSError|TimeoutError|PermissionError/,
+      stderr: "",
+      exitCode: 0,
+    });
+  }, 60_000);
+
+  it("keeps workspace cleanup and fresh execution isolation intact", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    await runDockerCase({
+      language: "python",
+      code: "from pathlib import Path\nPath('marker.txt').write_text('leak')\nprint('created')\n",
+      stdout: "created",
+    });
+
+    await runDockerCase({
+      language: "python",
+      code: "from pathlib import Path\nprint('exists=' + str(Path('marker.txt').exists()))\n",
+      stdout: "exists=False",
+    });
+  }, 30_000);
+
+  it("isolates stdin and Stop across rooms, users, sessions, and execution ids", async () => {
+    if (!(await requireDockerReadyForTest())) return;
+
+    const ownerA = { roomCode: "AUDITA", userId: "user-a", sessionId: "session-a" };
+    const ownerB = { roomCode: "AUDITB", userId: "user-b", sessionId: "session-b" };
+    const eventsA: ExecutionStreamEvent[] = [];
+    const eventsB: ExecutionStreamEvent[] = [];
+    const codeA = "import sys\nprint('ready-a', flush=True)\nvalue = sys.stdin.readline().strip()\nprint('got-a:' + value)\n";
+    const codeB = "import sys\nprint('ready-b', flush=True)\nvalue = sys.stdin.readline().strip()\nprint('got-b:' + value)\n";
+
+    const sessionA = startExecutionSession({ ...ownerA, language: "python", code: codeA, onEvent: (event) => eventsA.push(event) });
+    const sessionB = startExecutionSession({ ...ownerB, language: "python", code: codeB, onEvent: (event) => eventsB.push(event) });
+
+    if ("error" in sessionA) throw new Error(sessionA.error);
+    if ("error" in sessionB) throw new Error(sessionB.error);
+
+    try {
+      await waitForInteractiveEvent(eventsA, (event) => event.type === "stdout" && event.chunk.includes("ready-a"), 15_000);
+      await waitForInteractiveEvent(eventsB, (event) => event.type === "stdout" && event.chunk.includes("ready-b"), 15_000);
+
+      expect(getActiveExecutionId(ownerA)).toBe(sessionA.id);
+      expect(getActiveExecutionId(ownerB)).toBe(sessionB.id);
+      expect(writeExecutionStdin("not-an-execution", ownerA, "ignored\n")).toBe(false);
+      expect(writeExecutionStdin(sessionA.id, ownerB, "wrong-owner\n")).toBe(false);
+      expect(stopExecutionSession(sessionA.id, ownerB)).toBe(false);
+
+      const duplicate = startExecutionSession({ ...ownerA, language: "python", code: "print('duplicate')\n" });
+      expect("error" in duplicate).toBe(true);
+      if (!("error" in duplicate)) {
+        duplicate.stop();
+        await duplicate.done.catch(() => undefined);
+      }
+
+      expect(stopExecutionSession(sessionA.id, ownerA)).toBe(true);
+      const cancelled = await sessionA.done;
+      expect(cancelled.status).toBe("cancelled");
+      expect(getActiveExecutionId(ownerA)).toBeNull();
+
+      expect(writeExecutionStdin(sessionB.id, ownerB, "survivor\n")).toBe(true);
+      const survived = await sessionB.done;
+      expect(survived.status).toBe("success");
+      expect(survived.stdout).toContain("got-b:survivor");
+      expect(getActiveExecutionId(ownerB)).toBeNull();
+    } finally {
+      sessionA.stop();
+      sessionB.stop();
+      await Promise.allSettled([sessionA.done, sessionB.done]);
+    }
+  }, 45_000);
 });
 
 describe("Docker-backed execution integration", () => {
