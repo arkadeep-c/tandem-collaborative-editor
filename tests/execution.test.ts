@@ -22,6 +22,7 @@ import {
   JAVA_SOURCE_FILENAME,
   JAVA_VM_ARGS,
   normalizeBashSourceLineEndings,
+  normalizeExecutionSource,
   prepareJavaWorkspace,
   writeInteractiveStdin,
   parseBashErrors,
@@ -119,6 +120,51 @@ async function runJavaWhenAvailable(code: string, stdin?: string) {
   const availability = await javaAvailability();
   if (!availability.ready) return { skipped: true as const, availability };
   return { skipped: false as const, result: await executeCode("java", code, stdin) };
+}
+
+async function bashAvailability(): Promise<{ ready: boolean; reason?: string }> {
+  return getExecutionAvailability().then((availability) => availability.languages.bash);
+}
+
+async function runBashWhenAvailable(code: string, stdin?: string) {
+  const availability = await bashAvailability();
+  if (!availability.ready) return { skipped: true as const, availability };
+  return { skipped: false as const, result: await executeCode("bash", code, stdin) };
+}
+
+function multilineBashCrlfSource(): string {
+  return [
+    "",
+    "#!/usr/bin/env bash",
+    "",
+    "",
+    "set -u",
+    "",
+    "greet() {",
+    "  local target=\"$1\"",
+    "  echo \"Hello, $target\"",
+    "}",
+    "",
+    "echo \"Hello\"",
+    "",
+    "printf \"Enter name: \"",
+    "read -r NAME",
+    "",
+    "for i in 1 2 3; do",
+    "    echo \"Item $i\"",
+    "done",
+    "",
+    "greet \"$NAME\"",
+    "",
+    "",
+  ].join("\r\n");
+}
+
+function expectMultilineBashCrlfSource(source: string) {
+  expect(source).toContain("\r\n\r\n");
+  expect(source).toContain("read -r NAME\r\n");
+  expect(source).toContain("for i in 1 2 3; do\r\n");
+  expect(source.endsWith("\r\n")).toBe(true);
 }
 
 async function requireDockerReadyForTest(): Promise<boolean> {
@@ -458,12 +504,16 @@ describe("execution lifecycle classification", () => {
     }
   });
 
-  it("normalizes Bash source line endings without changing LF-only scripts", () => {
-    const lfOnly = "echo one\nread -r NAME\necho \"$NAME\"\n";
+  it("normalizes multiline Bash CRLF and lone-CR source without changing LF-only scripts", () => {
+    const crlfSource = multilineBashCrlfSource();
+    expectMultilineBashCrlfSource(crlfSource);
+
+    const lfOnly = crlfSource.replace(/\r\n/g, "\n");
     expect(normalizeBashSourceLineEndings(lfOnly)).toBe(lfOnly);
-    expect(
-      normalizeBashSourceLineEndings("echo one\r\nread -r NAME\r\necho \"$NAME\"\r"),
-    ).toBe(lfOnly);
+    expect(normalizeBashSourceLineEndings(crlfSource)).toBe(lfOnly);
+    expect(normalizeBashSourceLineEndings(lfOnly.replace(/\n/g, "\r"))).toBe(lfOnly);
+    expect(normalizeExecutionSource("bash", crlfSource)).toBe(lfOnly);
+    expect(normalizeExecutionSource("python", crlfSource)).toBe(crlfSource);
   });
 
   it("preserves timeout state for killed compile processes", () => {
@@ -989,36 +1039,52 @@ int main(void) {
     expect(execution.result.stderr).toBe("Execution stopped by user.");
   }, 20_000);
 
-  it("keeps interactive Bash read working when the source uses CRLF line endings", async () => {
-    const crlfScript = [
-      "#!/usr/bin/env bash",
-      "printf \"Name: \"",
-      "read -r NAME",
-      "printf \"Hello %s\\n\" \"$NAME\"",
-      "",
-    ].join("\r\n");
-
-    const execution = await runInteractiveDockerWhenReady(
-      "bash",
-      crlfScript,
-      async (handle, events) => {
-        await waitForInteractiveEvent(
-          events,
-          (event) => event.type === "stdout" && event.chunk.includes("Name:"),
-        );
-        expect(handle.writeStdin("Ada\n")).toBe(true);
-      },
-    );
-
-    if (execution.skipped) {
-      expect(await dockerExecutionReady()).toBe(false);
+  it("keeps interactive Bash read working through execution sessions with multiline CRLF source", async () => {
+    const availability = await bashAvailability();
+    if (!availability.ready) {
+      expect(availability.reason).toBeTruthy();
       return;
     }
 
-    expect(execution.result.status).toBe("success");
-    expect(execution.result.stdout).toContain("Name:");
-    expect(execution.result.stdout).toContain("Hello Ada");
-    expect(execution.result.stderr).not.toMatch(/not a valid identifier|\$'\\r'|command not found/);
+    const crlfScript = multilineBashCrlfSource();
+    expectMultilineBashCrlfSource(crlfScript);
+
+    const events: ExecutionStreamEvent[] = [];
+    const owner = {
+      roomCode: "BASHCR",
+      userId: "user-bash-crlf",
+      sessionId: "session-bash-crlf",
+    };
+    const session = startExecutionSession({
+      ...owner,
+      language: "bash",
+      code: crlfScript,
+      onEvent: (event) => events.push(event),
+    });
+
+    if ("error" in session) {
+      throw new Error(session.error);
+    }
+
+    try {
+      await waitForInteractiveEvent(
+        events,
+        (event) => event.type === "stdout" && event.chunk.includes("Enter name:"),
+      );
+      expect(writeExecutionStdin(session.id, owner, "Ada\n")).toBe(true);
+      const result = await session.done;
+
+      expect(result.status).toBe("success");
+      expect(result.stdout).toContain("Hello");
+      expect(result.stdout).toContain("Item 1");
+      expect(result.stdout).toContain("Item 2");
+      expect(result.stdout).toContain("Item 3");
+      expect(result.stdout).toContain("Hello, Ada");
+      expect(result.stderr).not.toMatch(/not a valid identifier|\$'\\r'|command not found|unexpected token/);
+    } finally {
+      session.stop();
+      await session.done.catch(() => undefined);
+    }
   }, 20_000);
 
   it("does not route stdin to another user or room execution", async () => {
@@ -1712,32 +1778,48 @@ else:
   }, 45_000);
 });
 
-describe("Docker-backed execution integration", () => {
-  it("executes Bash scripts with CRLF line endings without carriage-return command errors", async () => {
-    const crlfScript = [
-      "#!/usr/bin/env bash",
-      "",
-      "echo \"Hello from Bash\"",
-      "",
-      "echo \"Line 2 works\"",
-      "",
-      "echo \"Line 3 works\"",
-      "",
-    ].join("\r\n");
+describe("Bash CRLF execution", () => {
+  it("executes multiline Bash source with CRLF blank lines, read, and loops", async () => {
+    const crlfScript = multilineBashCrlfSource();
+    expectMultilineBashCrlfSource(crlfScript);
 
-    const execution = await runDockerWhenReady("bash", crlfScript);
+    const execution = await runBashWhenAvailable(crlfScript, "Ada\n");
+    if (execution.skipped) {
+      expect(execution.availability.ready).toBe(false);
+      expect(execution.availability.reason).toBeTruthy();
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout).toContain("Hello");
+    expect(execution.result.stdout).toContain("Enter name:");
+    expect(execution.result.stdout).toContain("Item 1");
+    expect(execution.result.stdout).toContain("Item 2");
+    expect(execution.result.stdout).toContain("Item 3");
+    expect(execution.result.stdout).toContain("Hello, Ada");
+    expect(execution.result.stderr).not.toMatch(/\$'\\r'|command not found|not a valid identifier|unexpected token|invalid option/);
+    expect(execution.result.exitCode).toBe(0);
+  }, 20_000);
+});
+
+describe("Docker-backed execution integration", () => {
+  it("executes multiline Bash scripts with CRLF line endings without carriage-return command errors", async () => {
+    const crlfScript = multilineBashCrlfSource();
+    expectMultilineBashCrlfSource(crlfScript);
+
+    const execution = await runDockerWhenReady("bash", crlfScript, "Ada\n");
     if (execution.skipped) {
       expect(await dockerExecutionReady()).toBe(false);
       return;
     }
 
     expect(execution.result.status).toBe("success");
-    expect(execution.result.stdout.trim()).toBe([
-      "Hello from Bash",
-      "Line 2 works",
-      "Line 3 works",
-    ].join("\n"));
-    expect(execution.result.stderr).not.toMatch(/\$'\\r'|command not found/);
+    expect(execution.result.stdout).toContain("Hello");
+    expect(execution.result.stdout).toContain("Item 1");
+    expect(execution.result.stdout).toContain("Item 2");
+    expect(execution.result.stdout).toContain("Item 3");
+    expect(execution.result.stdout).toContain("Hello, Ada");
+    expect(execution.result.stderr).not.toMatch(/\$'\\r'|command not found|not a valid identifier|unexpected token|invalid option/);
     expect(execution.result.exitCode).toBe(0);
   }, 20_000);
 

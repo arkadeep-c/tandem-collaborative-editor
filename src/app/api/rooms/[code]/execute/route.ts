@@ -5,6 +5,7 @@ import {
   executeCode,
   MAX_CODE_SIZE,
   MAX_STDIN_SIZE,
+  normalizeExecutionSource,
 } from "@/lib/execution/executor";
 import {
   EXECUTABLE_LANGUAGES,
@@ -62,7 +63,11 @@ function validateExecutionPayload(
     };
   }
 
-  return { language, sourceCode, stdin };
+  return {
+    language,
+    sourceCode: normalizeExecutionSource(language, sourceCode),
+    stdin,
+  };
 }
 
 export async function POST(request: NextRequest, ctx: RouteContext) {

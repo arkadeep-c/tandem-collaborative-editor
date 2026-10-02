@@ -166,7 +166,14 @@ export function getHostExecutionPath(
 }
 
 export function normalizeBashSourceLineEndings(code: string): string {
-  return code.replace(/\r\n?/g, "\n");
+  return code.replace(/\r\n|\r/g, "\n");
+}
+
+export function normalizeExecutionSource(
+  language: ExecutionLanguage,
+  code: string,
+): string {
+  return language === "bash" ? normalizeBashSourceLineEndings(code) : code;
 }
 
 export const JAVA_VM_ARGS = [
