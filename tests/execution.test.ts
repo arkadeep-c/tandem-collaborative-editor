@@ -8,7 +8,9 @@ import {
   createDockerWorkspaceMount,
   createInteractiveTerminalCommand,
   executeCode,
+  EXECUTION_TIMEOUT_MS,
   getExecutionAvailability,
+  getExecutionTimeoutMs,
   INTERACTIVE_TERMINAL_WRAPPER,
   startInteractiveExecution,
   type InteractiveExecutionHandle,
@@ -67,6 +69,20 @@ async function waitForInteractiveEvent(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("Timed out waiting for interactive execution event");
+}
+
+async function withExecutionTimeoutForTest<T>(
+  timeoutMs: number,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = process.env.TANDEM_EXECUTION_TIMEOUT_MS;
+  process.env.TANDEM_EXECUTION_TIMEOUT_MS = String(timeoutMs);
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env.TANDEM_EXECUTION_TIMEOUT_MS;
+    else process.env.TANDEM_EXECUTION_TIMEOUT_MS = previous;
+  }
 }
 
 async function runInteractiveDockerWhenReady(
@@ -180,6 +196,25 @@ describe("Docker execution readiness", () => {
     expect(script).toContain("ulimit -f 4096");
     expect(script).toContain("ulimit -u 96");
     expect(script).not.toContain("ulimit -v");
+  });
+
+  it("defaults Docker execution CPU limit to the 10 minute hard timeout", () => {
+    const previous = process.env.TANDEM_EXECUTION_TIMEOUT_MS;
+    try {
+      delete process.env.TANDEM_EXECUTION_TIMEOUT_MS;
+      const args = createDockerRunArgs({
+        image: "tandem-executor:test",
+        containerName: "tandem-exec-timeout-test",
+        workDir: "/tmp/tandem-exec-timeout-test",
+        command: "node",
+        args: ["main.js"],
+      });
+      const script = args[args.indexOf("-lc") + 1];
+      expect(script).toContain("ulimit -t 601");
+    } finally {
+      if (previous === undefined) delete process.env.TANDEM_EXECUTION_TIMEOUT_MS;
+      else process.env.TANDEM_EXECUTION_TIMEOUT_MS = previous;
+    }
   });
 
   it("wraps interactive programs in an in-container PTY without changing Docker TTY flags", () => {
@@ -297,6 +332,24 @@ describe("Java sandbox configuration", () => {
 });
 
 describe("execution lifecycle classification", () => {
+  it("uses a 10 minute hard execution timeout and caps test overrides to that limit", () => {
+    const previous = process.env.TANDEM_EXECUTION_TIMEOUT_MS;
+    try {
+      delete process.env.TANDEM_EXECUTION_TIMEOUT_MS;
+      expect(EXECUTION_TIMEOUT_MS).toBe(600_000);
+      expect(getExecutionTimeoutMs()).toBe(600_000);
+
+      process.env.TANDEM_EXECUTION_TIMEOUT_MS = "1200";
+      expect(getExecutionTimeoutMs()).toBe(1200);
+
+      process.env.TANDEM_EXECUTION_TIMEOUT_MS = "900000";
+      expect(getExecutionTimeoutMs()).toBe(600_000);
+    } finally {
+      if (previous === undefined) delete process.env.TANDEM_EXECUTION_TIMEOUT_MS;
+      else process.env.TANDEM_EXECUTION_TIMEOUT_MS = previous;
+    }
+  });
+
   it("preserves timeout state for killed compile processes", () => {
     expect(statusFromCompileLifecycle({ timedOut: true, outputTruncated: false, stderr: "" })).toBe("timeout");
     expect(statusFromCompileLifecycle({ timedOut: false, outputTruncated: false, stderr: "Main.java:1: error: ';' expected" })).toBe("compile_error");
@@ -319,6 +372,22 @@ describe("execution lifecycle classification", () => {
     stream.writableEnded = true;
     expect(writeInteractiveStdin(stream, "4\n")).toBe(false);
     expect(received).toBe("3\n");
+  });
+
+  it("delivers repeated complete stdin lines without coalescing or dropping the first line", () => {
+    const chunks: string[] = [];
+    const stream = {
+      destroyed: false,
+      writableEnded: false,
+      write(chunk: string) {
+        chunks.push(chunk);
+        return true;
+      },
+    };
+
+    expect(writeInteractiveStdin(stream, "10\n")).toBe(true);
+    expect(writeInteractiveStdin(stream, "11\n")).toBe(true);
+    expect(chunks).toEqual(["10\n", "11\n"]);
   });
 });
 
@@ -474,13 +543,15 @@ public class Main {
   }, 20_000);
 
   it("times out runaway Java programs", async () => {
-    const execution = await runJavaWhenAvailable(`public class Main {
+    const execution = await withExecutionTimeoutForTest(1_500, () =>
+      runJavaWhenAvailable(`public class Main {
     public static void main(String[] args) {
         while (true) {
         }
     }
 }
-`);
+`),
+    );
     if (execution.skipped) {
       expect(execution.availability.ready).toBe(false);
       return;
@@ -534,6 +605,60 @@ print(first + second + third)
 
     expect(execution.result.status).toBe("success");
     expect(execution.result.stdout.trim()).toBe("35");
+  }, 20_000);
+
+  it("keeps interactive sessions alive while waiting more than 10 seconds for stdin", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "python",
+      "value = input('Enter number: ')\nprint(f'Received: {value}')\n",
+      async (handle, events) => {
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("Enter number:"),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 11_000));
+        expect(handle.writeStdin("10\n")).toBe(true);
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout).toContain("Received: 10");
+  }, 25_000);
+
+  it("delivers the first submitted C stdin line immediately", async () => {
+    const execution = await runInteractiveDockerWhenReady(
+      "c",
+      `#include <stdio.h>
+int main(void) {
+    int n;
+    printf("Enter number of students: ");
+    fflush(stdout);
+    if (scanf("%d", &n) != 1) return 2;
+    printf("Received: %d\\n", n);
+    return 0;
+}
+`,
+      async (handle, events) => {
+        await waitForInteractiveEvent(
+          events,
+          (event) => event.type === "stdout" && event.chunk.includes("Enter number of students:"),
+        );
+        expect(handle.writeStdin("10\n")).toBe(true);
+      },
+    );
+
+    if (execution.skipped) {
+      expect(await dockerExecutionReady()).toBe(false);
+      return;
+    }
+
+    expect(execution.result.status).toBe("success");
+    expect(execution.result.stdout).toContain("Received: 10");
   }, 20_000);
 
   it("streams an unflushed C prompt before accepting stdin", async () => {
@@ -684,10 +809,12 @@ int main(void) {
     expect(execution.result.stdout.trim()).toBe("no input needed");
   }, 20_000);
 
-  it("times out programs that exceed the existing timeout", async () => {
-    const execution = await runInteractiveDockerWhenReady(
-      "python",
-      "import time\ntime.sleep(20)\n",
+  it("times out programs that exceed the configured timeout", async () => {
+    const execution = await withExecutionTimeoutForTest(1_500, () =>
+      runInteractiveDockerWhenReady(
+        "python",
+        "import time\ntime.sleep(20)\n",
+      ),
     );
 
     if (execution.skipped) {
@@ -850,7 +977,9 @@ sys.exit(7)
   }, 20_000);
 
   it("enforces timeout and recovers for the next Docker execution", async () => {
-    const timedOut = await runDockerWhenReady("javascript", "while (true) {}\n");
+    const timedOut = await withExecutionTimeoutForTest(1_500, () =>
+      runDockerWhenReady("javascript", "while (true) {}\n"),
+    );
     if (timedOut.skipped) {
       expect(await dockerExecutionReady()).toBe(false);
       return;

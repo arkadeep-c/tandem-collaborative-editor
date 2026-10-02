@@ -141,7 +141,7 @@ export default function OutputPanel({
     event.preventDefault();
     if (!running || !onSendInput) return;
 
-    const value = input;
+    const value = inputRef.current?.value ?? input;
     setInput("");
     await onSendInput(`${value}\n`);
   };
@@ -300,7 +300,7 @@ export default function OutputPanel({
         {result?.timedOut && (
           <div className="mt-3 flex items-center gap-2 rounded bg-amber-400/10 px-3 py-2 text-amber-200">
             <AlertTriangle className="h-4 w-4" />
-            <span>Execution timed out after 10 seconds. Sandbox cleaned up.</span>
+            <span>Execution timed out after 10 minutes. Sandbox cleaned up.</span>
           </div>
         )}
         {result?.outputTruncated && (

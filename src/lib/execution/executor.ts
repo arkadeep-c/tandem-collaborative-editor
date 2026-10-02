@@ -12,8 +12,7 @@ import {
   type ExecutionStreamEvent,
 } from "./types";
 
-export const EXECUTION_TIMEOUT_MS = 10_000;
-const TIMEOUT_MS = EXECUTION_TIMEOUT_MS;
+export const EXECUTION_TIMEOUT_MS = 600_000;
 const COMPILE_TIMEOUT_MS = 8_000;
 export const JAVA_COMPILE_TIMEOUT_MS = 20_000;
 export const OUTPUT_LIMIT_BYTES = 1024 * 1024;
@@ -143,6 +142,20 @@ export function createInteractiveTerminalCommand(
     command: "python3",
     args: ["-c", INTERACTIVE_TERMINAL_WRAPPER, command, ...args],
   };
+}
+
+export function getExecutionTimeoutMs(): number {
+  const configured = Number(process.env.TANDEM_EXECUTION_TIMEOUT_MS);
+
+  if (
+    process.env.NODE_ENV === "test" &&
+    Number.isFinite(configured) &&
+    configured > 0
+  ) {
+    return Math.min(Math.floor(configured), EXECUTION_TIMEOUT_MS);
+  }
+
+  return EXECUTION_TIMEOUT_MS;
 }
 
 export function getHostExecutionPath(
@@ -444,7 +457,7 @@ async function rawSpawn(
     const timeout = setTimeout(() => {
       timedOut = true;
       killChild();
-    }, options.timeoutMs || TIMEOUT_MS);
+    }, options.timeoutMs ?? getExecutionTimeoutMs());
 
     options.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -640,7 +653,7 @@ function rawSpawnInteractive(
   const timeout = setTimeout(() => {
     timedOut = true;
     killChild();
-  }, options.timeoutMs || TIMEOUT_MS);
+  }, options.timeoutMs ?? getExecutionTimeoutMs());
 
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -745,7 +758,7 @@ class LinuxNamespaceBackend implements SandboxBackend {
     const script = [
       'cd "$TANDEM_WORKDIR" || exit 111',
       `ulimit -t ${Math.ceil(
-        (options.timeoutMs || TIMEOUT_MS) / 1000,
+        (options.timeoutMs ?? getExecutionTimeoutMs()) / 1000,
       ) + 1}`,
       `ulimit -f ${FILE_SIZE_BLOCKS}`,
       `ulimit -v ${Math.floor(
@@ -797,7 +810,7 @@ class LinuxNamespaceBackend implements SandboxBackend {
     const script = [
       'cd "$TANDEM_WORKDIR" || exit 111',
       `ulimit -t ${Math.ceil(
-        (options.timeoutMs || TIMEOUT_MS) / 1000,
+        (options.timeoutMs ?? getExecutionTimeoutMs()) / 1000,
       ) + 1}`,
       `ulimit -f ${FILE_SIZE_BLOCKS}`,
       `ulimit -v ${Math.floor(
@@ -845,7 +858,7 @@ export function createDockerRunArgs({
   workDir,
   command,
   args,
-  timeoutMs = TIMEOUT_MS,
+  timeoutMs = getExecutionTimeoutMs(),
 }: DockerRunArgsOptions): string[] {
   const script = [
     "cd /workspace || exit 111",
@@ -1862,7 +1875,7 @@ export async function executeCode(
   const run = async (
     command: string,
     args: string[],
-    timeoutMs = TIMEOUT_MS,
+    timeoutMs = getExecutionTimeoutMs(),
   ) => {
     const result = await backend.run(command, args, {
       cwd: workDir,
@@ -2331,7 +2344,7 @@ export function startInteractiveExecution(
       const run = async (
         command: string,
         args: string[],
-        timeoutMs = TIMEOUT_MS,
+        timeoutMs = getExecutionTimeoutMs(),
       ) => {
         emit({ type: "status", status: "running", message: "Running program..." });
 
