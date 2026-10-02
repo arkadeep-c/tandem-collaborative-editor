@@ -1248,8 +1248,9 @@ print(f"name={name};number={int(value) * 2};word={word}")
         language: "javascript",
         stdin: structuredInput,
         code: `const fs = require("fs");
-const [name, rest] = fs.readFileSync(0, "utf8").trimEnd().split(/\n/);
-const [value, word] = rest.split(/\s+/);
+const lines = fs.readFileSync(0, "utf8").split(/\r?\n/);
+const name = lines[0];
+const [value, word] = lines[1].split(/\s+/);
 console.log(` + "`name=${name};number=${Number(value) * 2};word=${word}`" + `);
 `,
         stdout: "name=Ada Lovelace;number=42;word=token",
@@ -1258,8 +1259,9 @@ console.log(` + "`name=${name};number=${Number(value) * 2};word=${word}`" + `);
         language: "typescript",
         stdin: structuredInput,
         code: `const fs = require("fs");
-const [name, rest] = fs.readFileSync(0, "utf8").trimEnd().split(/\n/);
-const [value, word] = rest.split(/\s+/);
+const lines = fs.readFileSync(0, "utf8").split(/\r?\n/);
+const name = lines[0];
+const [value, word] = lines[1].split(/\s+/);
 console.log(` + "`name=${name};number=${Number(value) * 2};word=${word}`" + `);
 `,
         stdout: "name=Ada Lovelace;number=42;word=token",
