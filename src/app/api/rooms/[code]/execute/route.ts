@@ -5,8 +5,8 @@ import {
   executeCode,
   MAX_CODE_SIZE,
   MAX_STDIN_SIZE,
-  normalizeExecutionSource,
 } from "@/lib/execution/executor";
+import { normalizeExecutionSource } from "@/lib/execution/source";
 import {
   EXECUTABLE_LANGUAGES,
   isExecutionLanguage,

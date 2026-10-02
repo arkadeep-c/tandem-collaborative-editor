@@ -11,6 +11,11 @@ import {
   type ExecutionResult,
   type ExecutionStreamEvent,
 } from "./types";
+import { normalizeBashSourceLineEndings } from "./source";
+export {
+  normalizeBashSourceLineEndings,
+  normalizeExecutionSource,
+} from "./source";
 
 export const EXECUTION_TIMEOUT_MS = 600_000;
 const COMPILE_TIMEOUT_MS = 8_000;
@@ -163,17 +168,6 @@ export function getHostExecutionPath(
   hostPath: string | undefined = process.env.PATH,
 ): string {
   return hostPlatform === "win32" ? hostPath ?? "" : SAFE_PATH;
-}
-
-export function normalizeBashSourceLineEndings(code: string): string {
-  return code.replace(/\r\n|\r/g, "\n");
-}
-
-export function normalizeExecutionSource(
-  language: ExecutionLanguage,
-  code: string,
-): string {
-  return language === "bash" ? normalizeBashSourceLineEndings(code) : code;
 }
 
 export const JAVA_VM_ARGS = [

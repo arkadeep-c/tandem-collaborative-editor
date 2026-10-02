@@ -57,6 +57,7 @@ import {
   type ExecutionStreamEvent,
   type ExecutionStreamStatus,
 } from "@/lib/execution/types";
+import { normalizeExecutionSource } from "@/lib/execution/source";
 
 type ViewMode = "edit" | "split" | "preview";
 type BottomTab = "output" | "problems";
@@ -371,7 +372,7 @@ export default function EditorRoom({ room, you, role }: EditorRoomProps) {
       });
       return;
     }
-    const code = getCurrentContent();
+    const code = normalizeExecutionSource(state.language, getCurrentContent());
     if (!code.trim()) return;
 
     const controller = new AbortController();
