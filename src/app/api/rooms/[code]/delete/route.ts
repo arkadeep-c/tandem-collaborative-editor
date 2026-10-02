@@ -4,13 +4,17 @@ import { documents, roomMembers, rooms } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { requireRoomAccess } from "@/lib/roomAccess";
 import { roomEngine } from "@/lib/collab/rooms";
+import { evictRedisRoom, publishRedisEvent } from "@/lib/collab/redisRealtime";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
 import { getAuthenticatedSessionFromRequest } from "@/lib/session";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string }> };
 
-export async function DELETE(request: NextRequest, ctx: RouteContext) {
+async function DELETEHandler(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
 
   const auth = await getAuthenticatedSessionFromRequest(request);
@@ -26,17 +30,25 @@ export async function DELETE(request: NextRequest, ctx: RouteContext) {
   const roomId = access.room.id;
   const docId = access.room.documentId;
 
-  // Remove from engine (active cache) - try to get and teardown if exists
   try {
-    const room = await roomEngine.getRoom(access.code);
-    if (room) {
-      // @ts-ignore - internal cleanup
-      if (typeof (room as any).teardown === "function") {
-        await (room as any).teardown();
+    if (shouldUseRedisRealtime()) {
+      await publishRedisEvent(access.code, {
+        type: "access_revoked",
+        reason: "kicked",
+        message: "This room was deleted by the room owner.",
+      });
+      await evictRedisRoom(access.code);
+    } else {
+      const room = await roomEngine.getRoom(access.code);
+      if (room) {
+        // @ts-ignore - internal cleanup hook may exist in future engines
+        if (typeof (room as any).teardown === "function") {
+          await (room as any).teardown();
+        }
       }
     }
   } catch (e) {
-    console.warn("[delete] engine cleanup failed", e);
+    console.warn("[delete] active room cleanup failed", e);
   }
 
   // Delete from DB: members, room, document
@@ -61,3 +73,5 @@ export async function DELETE(request: NextRequest, ctx: RouteContext) {
 
   return NextResponse.json({ ok: true, deleted: access.code });
 }
+
+export const DELETE = withJsonErrors("api.rooms.[code].delete.delete", DELETEHandler);

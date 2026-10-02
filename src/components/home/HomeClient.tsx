@@ -65,12 +65,12 @@ const PILLARS = [
   {
     icon: Database,
     title: "Cache-hot, Postgres-true",
-    body: "Active rooms stay hot in a cache layer (Redis when configured, in-memory otherwise). PostgreSQL remains the durable source of truth.",
+    body: "Active rooms stay hot in Redis for production collaboration, while PostgreSQL remains the durable source of truth.",
   },
   {
     icon: Timer,
     title: "Ordered, then flushed",
-    body: "Every room applies ops in one serialized order with position transforms, then a 5s trailing debounce persists to Postgres.",
+    body: "Every room applies ops in one serialized order with position transforms, then persists accepted revisions to Postgres.",
   },
 ];
 

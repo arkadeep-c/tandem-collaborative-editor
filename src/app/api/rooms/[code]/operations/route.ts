@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { roomEngine } from "@/lib/collab/rooms";
+import { applyRedisOperations } from "@/lib/collab/redisRealtime";
 import { operationsLimiter } from "@/lib/rateLimit";
 import { requireRoomAccess } from "@/lib/roomAccess";
 import { validateOps } from "@/lib/validation";
 import type { OperationAck, OperationStale } from "@/lib/types";
 import { getAuthenticatedSessionFromRequest } from "@/lib/session";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string }> };
@@ -13,7 +17,7 @@ type RouteContext = { params: Promise<{ code: string }> };
 /**
  * POST /api/rooms/:code/operations — edit path. Accepts cookie OR bearer.
  */
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
 
   const auth = await getAuthenticatedSessionFromRequest(request);
@@ -43,13 +47,40 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "Malformed request." }, { status: 400 });
   }
 
-  if (!operationsLimiter.hit(body.connectionId)) {
+  if (!(await operationsLimiter.hitAsync(body.connectionId))) {
     return NextResponse.json({ error: "Too many edits." }, { status: 429 });
   }
 
   const validated = validateOps(body.ops);
   if (!validated.ok) {
     return NextResponse.json({ error: validated.reason }, { status: 400 });
+  }
+
+  if (shouldUseRedisRealtime()) {
+    try {
+      const result = await applyRedisOperations(
+        access,
+        body.connectionId,
+        body.baseRevision as number,
+        validated.ops,
+      );
+      if ("stale" in result) {
+        const payload: OperationStale = {
+          ok: false,
+          code: "STALE_REVISION",
+          revision: result.revision,
+          content: result.content,
+        };
+        return NextResponse.json(payload, { status: 409 });
+      }
+      const ack: OperationAck = { ok: true, revision: result.revision };
+      return NextResponse.json(ack);
+    } catch (err) {
+      if (err instanceof Error && err.message === "UNAUTHORIZED_CONNECTION") {
+        return NextResponse.json({ error: "Unauthorized." }, { status: 403 });
+      }
+      throw err;
+    }
   }
 
   const room = await roomEngine.getRoom(access.code);
@@ -80,3 +111,5 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   const ack: OperationAck = { ok: true, revision: result.revision };
   return NextResponse.json(ack);
 }
+
+export const POST = withJsonErrors("api.rooms.[code].operations.post", POSTHandler);

@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { roomEngine } from "@/lib/collab/rooms";
+import { getRedisActiveCount, getRedisPresence, updateRedisMeta } from "@/lib/collab/redisRealtime";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
 import { metaUpdateLimiter } from "@/lib/rateLimit";
 import { listRoomMembers, requireRoomAccess } from "@/lib/roomAccess";
 import { getAuthenticatedSessionFromRequest, type SessionUser } from "@/lib/session";
 import { normalizeRoomTemplateMode } from "@/lib/roomTemplates";
 import { cleanTitle, isLanguageId } from "@/lib/validation";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string }> };
@@ -15,17 +19,20 @@ function sessionOr401(session: SessionUser | null): session is SessionUser {
 }
 
 /** GET /api/rooms/:code — room info for verified members. Accepts cookie OR bearer. */
-export async function GET(request: NextRequest, ctx: RouteContext) {
+async function GETHandler(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
   const access = await requireRoomAccess(code, request);
   if (!access.ok) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
-  const activeRoom = await roomEngine.getRoom(access.code);
+  const useRedis = shouldUseRedisRealtime();
+  const activePresence = useRedis ? await getRedisPresence(access.code) : null;
+  const activeRoom = useRedis ? null : await roomEngine.getRoom(access.code);
   const members = await listRoomMembers(
     access.room.id,
-    activeRoom ? [...activeRoom.users.values()] : [],
+    activePresence ?? (activeRoom ? [...activeRoom.users.values()] : []),
   );
+  const activeUsers = useRedis ? await getRedisActiveCount(access.code) : roomEngine.getActiveCount(access.code);
   return NextResponse.json({
     room: {
       code: access.code,
@@ -34,7 +41,7 @@ export async function GET(request: NextRequest, ctx: RouteContext) {
       locked: Boolean(access.room.locked),
       templateMode: normalizeRoomTemplateMode(access.room.templateMode),
       role: access.member.role === "owner" ? "owner" : "editor",
-      activeUsers: roomEngine.getActiveCount(access.code),
+      activeUsers,
       updatedAt: access.room.updatedAt.toISOString(),
     },
     members,
@@ -50,7 +57,7 @@ export async function GET(request: NextRequest, ctx: RouteContext) {
  * PATCH /api/rooms/:code — room metadata (title / language).
  * Owner-only, accepts cookie OR bearer.
  */
-export async function PATCH(request: NextRequest, ctx: RouteContext) {
+async function PATCHHandler(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
 
   const auth = await getAuthenticatedSessionFromRequest(request);
@@ -58,7 +65,7 @@ export async function PATCH(request: NextRequest, ctx: RouteContext) {
   if (!sessionOr401(session)) {
     return NextResponse.json({ error: "Session expired." }, { status: 401 });
   }
-  if (!metaUpdateLimiter.hit(session.user.id)) {
+  if (!(await metaUpdateLimiter.hitAsync(session.user.id))) {
     return NextResponse.json({ error: "Too many updates." }, { status: 429 });
   }
 
@@ -90,8 +97,15 @@ export async function PATCH(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "Nothing to update." }, { status: 400 });
   }
 
-  const room = await roomEngine.getRoom(access.code);
-  if (room) await room.updateMeta(patch);
+  if (shouldUseRedisRealtime()) {
+    await updateRedisMeta(access, patch);
+  } else {
+    const room = await roomEngine.getRoom(access.code);
+    if (room) await room.updateMeta(patch);
+  }
 
   return NextResponse.json({ ok: true, ...patch });
 }
+
+export const GET = withJsonErrors("api.rooms.[code].get", GETHandler);
+export const PATCH = withJsonErrors("api.rooms.[code].patch", PATCHHandler);

@@ -3,15 +3,19 @@ import { desc, eq, inArray } from "drizzle-orm";
 import { db, ensureRoomTemplateModeColumn } from "@/db";
 import { documents, roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
+import { getRedisActiveCount } from "@/lib/collab/redisRealtime";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
 import { normalizeRoomTemplateMode } from "@/lib/roomTemplates";
 import { getAuthenticatedSessionFromRequest } from "@/lib/session";
 import type { RoomSummary } from "@/lib/types";
 import { count as drizzleCount } from "drizzle-orm";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** GET /api/rooms/mine — rooms the verified session belongs to. Accepts cookie OR bearer. */
-export async function GET(request: NextRequest) {
+async function GETHandler(request: NextRequest) {
   const auth = await getAuthenticatedSessionFromRequest(request);
   const session = auth.session;
   if (!session) {
@@ -57,18 +61,23 @@ export async function GET(request: NextRequest) {
     for (const row of counts) memberCounts.set(row.roomId, row.total);
   }
 
-  const payload: RoomSummary[] = memberships.map((m: any) => ({
-    code: m.code,
-    title: m.title,
-    language: m.language,
-    role: m.role === "owner" ? "owner" : "editor",
-    locked: Boolean(m.locked),
-    templateMode: normalizeRoomTemplateMode(m.templateMode),
-    memberCount: memberCounts.get(m.roomId) ?? 1,
-    activeUsers: roomEngine.getActiveCount(m.code),
-    createdAt: m.createdAt.toISOString(),
-    updatedAt: m.updatedAt.toISOString(),
-  }));
+  const useRedis = shouldUseRedisRealtime();
+  const payload: RoomSummary[] = await Promise.all(
+    memberships.map(async (m: any) => ({
+      code: m.code,
+      title: m.title,
+      language: m.language,
+      role: m.role === "owner" ? "owner" : "editor",
+      locked: Boolean(m.locked),
+      templateMode: normalizeRoomTemplateMode(m.templateMode),
+      memberCount: memberCounts.get(m.roomId) ?? 1,
+      activeUsers: useRedis ? await getRedisActiveCount(m.code) : roomEngine.getActiveCount(m.code),
+      createdAt: m.createdAt.toISOString(),
+      updatedAt: m.updatedAt.toISOString(),
+    })),
+  );
 
   return NextResponse.json({ rooms: payload });
 }
+
+export const GET = withJsonErrors("api.rooms.mine.get", GETHandler);

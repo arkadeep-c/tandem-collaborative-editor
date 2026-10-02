@@ -15,8 +15,11 @@ import {
 import { startExecutionSession } from "@/lib/execution/interactiveSessions";
 import { isLanguageId } from "@/lib/validation";
 import { SlidingWindowLimiter } from "@/lib/rateLimit";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const executionLimiter = new SlidingWindowLimiter(20, 60 * 1000);
 
@@ -70,7 +73,7 @@ function validateExecutionPayload(
   };
 }
 
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
 
   const auth = await getAuthenticatedSessionFromRequest(request);
@@ -78,7 +81,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return jsonError("Session expired.", 401);
   }
 
-  if (!executionLimiter.hit(auth.session.user.id)) {
+  if (!(await executionLimiter.hitAsync(auth.session.user.id))) {
     return jsonError("Too many execution requests. Try again later.", 429);
   }
 
@@ -146,6 +149,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
           );
         } catch {
           closed = true;
+          sessionStop?.();
         }
       };
 
@@ -193,3 +197,5 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     },
   });
 }
+
+export const POST = withJsonErrors("api.rooms.[code].execute.post", POSTHandler);

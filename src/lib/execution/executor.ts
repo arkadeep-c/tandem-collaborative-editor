@@ -544,6 +544,10 @@ async function rawSpawn(
       });
     });
 
+    child.stdin.on("error", () => {
+      // Some short-lived programs exit before stdin is written; ignore EPIPE and
+      // let the normal close/error path produce the execution result.
+    });
     try {
       child.stdin.end(options.stdin ?? "");
     } catch {}
@@ -1017,12 +1021,15 @@ async function resolveBackend(
     return null;
   }
 
+  const vercelDeployment = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+  const productionDeployment =
+    process.env.APP_ENV === "production" || process.env.VERCEL_ENV === "production";
   const allowNamespace =
-    requested === "linux-namespace" ||
-    process.env.APP_ENV === "preview" ||
-    process.env.USE_LOCAL_DEV_DB === "true" ||
-    process.env.TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR === "true" ||
-    process.env.NODE_ENV !== "production";
+    !productionDeployment &&
+    !vercelDeployment &&
+    (requested === "linux-namespace" ||
+      process.env.TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR === "true" ||
+      process.env.NODE_ENV !== "production");
 
   if (
     platform() === "linux" &&
@@ -1036,7 +1043,7 @@ async function resolveBackend(
 }
 
 function backendUnavailableMessage(): string {
-  return "Code execution is unavailable because no supported isolated execution runtime is configured. Configure a Linux Docker sandbox image with TANDEM_EXECUTION_IMAGE, or use the documented Linux/WSL development sandbox. Unsafe host execution is disabled.";
+  return "Code execution is unavailable because no supported isolated execution runtime is configured. Use TANDEM_EXECUTION_BACKEND=docker with TANDEM_EXECUTION_IMAGE on a host that provides Docker, or keep execution disabled on Vercel until a separate isolated execution service is added. Unsafe host execution is disabled.";
 }
 
 function shellQuote(value: string): string {

@@ -78,21 +78,24 @@ Next.js API routes
   ├─ execution API
   └─ collaboration stream
         ↓
-Room engine
-  ├─ one hot Room object per active room
-  ├─ serialized per-room operation order
+Collaboration backend
+  ├─ local/dev: process-local RoomEngine with serialized per-room order
+  ├─ production/Vercel: Redis-backed hot state, locks, pub/sub, presence
   ├─ OT-lite insert/delete transforms
-  ├─ presence registry
-  └─ debounced persistence
+  ├─ server-side membership authorization
+  └─ durable PostgreSQL persistence
         ↓
 PostgreSQL durable store
-Redis hot document cache when configured
-SQLite + memory cache only for explicit preview/local fallback
+Redis shared realtime coordination in production
+SQLite + memory cache only for explicit local/ephemeral preview fallback
 ```
 
-The realtime ordering model is intentionally single-process. It does not claim
-fully distributed horizontal consistency. Run one application instance for the
-realtime plane unless you redesign the collaboration layer.
+Local development keeps the small single-process RoomEngine because it is easy to
+understand and works well for one app process. Vercel production cannot rely on
+process-local memory because independent serverless functions do not share Maps,
+subscribers, timers, or rate-limit buckets. Production therefore requires Redis
+for shared hot document state, per-room operation locks, cross-function pub/sub,
+presence, and shared rate limits.
 
 ---
 
@@ -124,7 +127,9 @@ all pass through server-side authorization.
 - Room codes are server-minted, human-friendly, and unique.
 - Room membership prevents duplicate joins.
 - Room metadata and documents are associated through the database schema.
-- Document edits are flushed with a 5 second debounce.
+- Local RoomEngine edits are flushed with a 5 second debounce.
+- Vercel/Redis production persists accepted edit batches to PostgreSQL immediately
+  after the Redis-locked operation order is applied.
 - The UI reports connection and save state from the collaboration stream.
 - Leaving a room removes live presence and membership. If an owner leaves while
   other members remain, ownership transfers to the oldest remaining member.
@@ -132,7 +137,7 @@ all pass through server-side authorization.
   room, memberships, and document.
 
 Production persistence is PostgreSQL. Preview/local fallback is SQLite only when
-explicitly enabled.
+explicitly enabled and is disabled for real production deployments.
 
 ---
 
@@ -193,7 +198,7 @@ backend with:
 - process/file limits
 - cleanup after execution
 
-Production should use a dedicated Docker image configured with:
+Local Docker execution is configured with:
 
 ```bash
 docker build -f docker/executor.Dockerfile -t tandem-executor:local .
@@ -208,10 +213,13 @@ The Docker image must contain `gcc`, `g++`, `python3`, `node`, and `bash`.
 Tandem runs containers with no network, memory/pid/CPU limits, read-only root,
 and a disposable workspace mount.
 
-For local Linux/Arena preview, Tandem can use the Linux namespace backend when
-preview/local flags are set. This is suitable for development and testing but is
-not advertised as a hardened multi-tenant production sandbox. If no backend is
-available, execution fails closed with a clean `unavailable` message.
+Vercel's Next.js runtime does not provide a colocated Docker daemon for arbitrary
+code execution. On Vercel, leave `TANDEM_EXECUTION_BACKEND=disabled` unless you
+add a separate isolated execution service. If no backend is available, execution
+fails closed with a clean `unavailable` message and the editor/collaboration
+product continues to work. The Linux namespace backend is only available through
+explicit local opt-in (`TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR=true`) and is not a
+Vercel production sandbox.
 
 ---
 
@@ -279,6 +287,100 @@ with `ready: true`. If Docker is not available, execution stays unavailable and
 fails closed; the editor, collaboration, Markdown, HTML/CSS preview, and JSON
 tooling still work.
 
+
+---
+
+## Vercel deployment
+
+Tandem can deploy on Vercel when the stateful pieces are backed by managed
+services instead of local process memory, local files, or Docker.
+
+### 1. Create managed PostgreSQL
+
+Create a PostgreSQL database with a provider reachable from Vercel. Copy the
+connection string into Vercel as `DATABASE_URL`. Do not use `localhost`,
+`127.0.0.1`, Docker Compose service names, or a local Windows/PostgreSQL URL.
+
+### 2. Create managed Redis/Valkey
+
+Redis is required for production realtime collaboration on Vercel. Configure
+`REDIS_URL` with a managed Redis/Valkey URL. Tandem uses Redis for:
+
+- hot document state shared by independent functions
+- per-room operation locks that preserve monotonic revisions
+- pub/sub fan-out to SSE streams on different function instances
+- presence and connection ownership
+- shared rate-limit windows
+
+Without Redis, production startup fails instead of silently falling back to
+in-memory state. Local development can still use memory.
+
+### 3. Configure Vercel environment variables
+
+Required production variables:
+
+```env
+APP_ENV=production
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
+REDIS_URL=redis://USER:PASSWORD@HOST:PORT
+SESSION_SECRET=<32-byte-or-longer-random-secret>
+SESSION_COOKIE_SECURE=true
+SESSION_COOKIE_SAMESITE=none
+SESSION_COOKIE_PARTITIONED=true
+```
+
+Optional production variables:
+
+```env
+APP_URL=https://your-app.vercel.app
+TANDEM_EXECUTION_BACKEND=disabled
+POSTGRES_POOL_MAX=1
+```
+
+`SameSite=None` + `Partitioned` is useful for embedded/cross-site preview
+contexts. For a plain same-origin custom domain, `SameSite=Lax` can also work,
+but the existing deployment-safe default remains the stricter HTTPS-compatible
+configuration above.
+
+### 4. Run migrations safely
+
+Run the idempotent migration script against the production database before the
+first deploy and whenever new migrations are added:
+
+```bash
+DATABASE_URL='postgresql://...' APP_ENV=production npm run db:migrate
+```
+
+The script uses a PostgreSQL advisory lock and records applied files in
+`tandem_migrations`. It does not drop or reset data.
+
+### 5. Deploy from GitHub
+
+Connect the repository to Vercel and deploy the branch you want to release. Vercel
+detects Next.js automatically; no `vercel.json` is required. Do not use the
+Dockerfile as the Vercel runtime. The Dockerfile remains for local/container
+deployments.
+
+### 6. Verify production
+
+After deployment:
+
+1. Open `/api/health`; it should return JSON with `status: "ok"` and
+   `cache: "redis"`.
+2. Open `/api/session`; it should return JSON, create a signed HttpOnly cookie,
+   and return the same user on refresh.
+3. Create a room from the home page.
+4. Open the same room in another browser/profile and verify collaboration,
+   presence, room listing, join/leave, and persistence after refresh.
+5. Open `/api/execution`; on Vercel it should report execution unavailable unless
+   an isolated external execution backend has been configured.
+
+### 7. Execution limitation on Vercel
+
+Local Docker execution remains supported. Vercel production does not execute user
+code inside the normal application host. The Run button degrades safely to an
+`unavailable` result unless a future isolated execution service is integrated.
+
 ---
 
 ## Standard commands
@@ -288,7 +390,8 @@ npm run dev
 npm test
 npm run lint
 npm run typecheck
-APP_ENV=preview USE_LOCAL_DEV_DB=true npm run build
+npm run build
+npm run db:migrate
 ```
 
 `npm test` runs `vitest run`.
@@ -299,21 +402,25 @@ APP_ENV=preview USE_LOCAL_DEV_DB=true npm run build
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string for production |
-| `REDIS_URL` | Redis document cache URL; memory fallback only in preview/dev |
-| `SESSION_SECRET` | Required in production/preview for signed sessions |
-| `SESSION_COOKIE_SECURE` | Override Secure cookie flag |
-| `SESSION_COOKIE_SAMESITE` | Override SameSite (`none`, `lax`, `strict`) |
-| `SESSION_COOKIE_PARTITIONED` | Enable Partitioned cookies for embedded previews |
-| `APP_ENV=preview` | Enables preview behavior and SQLite fallback |
-| `USE_LOCAL_DEV_DB=true` | Enables SQLite fallback explicitly |
-| `SQLITE_DB_PATH` | Optional SQLite path, default `./data/tandem.db` |
-| `TANDEM_EXECUTION_BACKEND` | `docker`, `linux-namespace`, `disabled`, or `auto` |
-| `TANDEM_EXECUTION_IMAGE` | Docker image for production execution sandbox |
-| `TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR=true` | Explicit local opt-in for namespace backend |
+| Variable | Required in production | Purpose |
+| --- | --- | --- |
+| `APP_ENV=production` | Yes | Enables production safety checks |
+| `DATABASE_URL` | Yes | Managed PostgreSQL connection string |
+| `REDIS_URL` | Yes | Shared realtime state, pub/sub, presence, locks, rate limits |
+| `SESSION_SECRET` | Yes | Signed session cookies and bearer fallback |
+| `SESSION_COOKIE_SECURE=true` | Yes | HTTPS-only session cookie |
+| `SESSION_COOKIE_SAMESITE=none` | Recommended | Cross-site/embedded compatibility |
+| `SESSION_COOKIE_PARTITIONED=true` | Recommended | CHIPS/embedded preview compatibility |
+| `APP_URL` | No | Canonical deployment URL for diagnostics/docs |
+| `POSTGRES_POOL_MAX` | No | Connection pool cap; `1` is recommended on Vercel |
+| `TANDEM_EXECUTION_BACKEND` | No | `disabled` on Vercel unless an external isolated backend exists |
+| `TANDEM_EXECUTION_IMAGE` | Local only | Docker image for local/container execution sandbox |
+| `USE_LOCAL_DEV_DB=true` | Local/ephemeral preview only | Enables SQLite fallback outside production |
+| `SQLITE_DB_PATH` | Local only | SQLite path, default `./data/tandem.db` |
+| `TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR=true` | Local only | Explicit opt-in for namespace backend |
 
-Do not commit real secrets. Do not silently use SQLite/in-memory cache in
-production.
+Do not commit real secrets. Production refuses localhost PostgreSQL, SQLite, and
+in-memory realtime fallback.
 
 ---
 
@@ -340,9 +447,11 @@ Manual browser acceptance should verify:
 ## Known limitations
 
 - Tandem is a single-document room editor, not a multi-file IDE.
-- The realtime engine is single-process and not a distributed OT service.
+- Local development uses the single-process RoomEngine; production Vercel uses
+  Redis coordination and still requires managed Redis to preserve realtime
+  semantics across functions.
 - SQL execution is not supported.
 - Go/Rust/YAML are not V1 languages.
 - HTML/CSS preview is deliberately limited and sandboxed; scripts are disabled.
-- The Linux namespace execution backend is for local/preview use. Use a dedicated
-  Docker sandbox image for production.
+- Code execution on Vercel is disabled unless a separate isolated execution
+  backend is added. Local Docker execution remains supported.

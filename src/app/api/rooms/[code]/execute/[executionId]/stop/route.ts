@@ -2,14 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireRoomAccess } from "@/lib/roomAccess";
 import { stopExecutionSession } from "@/lib/execution/interactiveSessions";
 import { SlidingWindowLimiter } from "@/lib/rateLimit";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const stopLimiter = new SlidingWindowLimiter(60, 60 * 1000);
 
 type RouteContext = { params: Promise<{ code: string; executionId: string }> };
 
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code, executionId } = await ctx.params;
 
   const access = await requireRoomAccess(code, request);
@@ -17,7 +19,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: access.error }, { status: access.status });
   }
 
-  if (!stopLimiter.hit(access.session.user.id)) {
+  if (!(await stopLimiter.hitAsync(access.session.user.id))) {
     return NextResponse.json({ error: "Too many stop requests. Try again later." }, { status: 429 });
   }
 
@@ -33,3 +35,5 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
 
   return NextResponse.json({ ok: true });
 }
+
+export const POST = withJsonErrors("api.rooms.[code].execute.[executionId].stop.post", POSTHandler);

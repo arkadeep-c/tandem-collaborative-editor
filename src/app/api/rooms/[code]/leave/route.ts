@@ -3,8 +3,12 @@ import { and, asc, eq, ne } from "drizzle-orm";
 import { db, isUsingLocalDb } from "@/db";
 import { roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
+import { getRedisPresence, publishRedisEvent, removeRedisUserPresence } from "@/lib/collab/redisRealtime";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
 import { listRoomMembers, requireRoomAccess } from "@/lib/roomAccess";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string }> };
@@ -14,7 +18,7 @@ type RouteContext = { params: Promise<{ code: string }> };
  * If an owner leaves while others remain, ownership transfers to the oldest
  * remaining member. Accepts cookie OR bearer.
  */
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
   const access = await requireRoomAccess(code, request);
   if (!access.ok) {
@@ -73,15 +77,24 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "Failed to leave room." }, { status: 500 });
   }
 
-  const room = await roomEngine.getRoom(access.code);
-  room?.leaveUser(access.session.user.id);
-  const members = await listRoomMembers(
-    access.room.id,
-    room ? [...room.users.values()] : [],
-  );
-  if (typeof room?.notifyMemberLeft === "function") {
-    room.notifyMemberLeft(access.session.user, members);
+  if (shouldUseRedisRealtime()) {
+    await removeRedisUserPresence(access.code, access.session.user.id);
+    const presence = await getRedisPresence(access.code);
+    const members = await listRoomMembers(access.room.id, presence);
+    await publishRedisEvent(access.code, { type: "member_leave", user: access.session.user, members });
+  } else {
+    const room = await roomEngine.getRoom(access.code);
+    room?.leaveUser(access.session.user.id);
+    const members = await listRoomMembers(
+      access.room.id,
+      room ? [...room.users.values()] : [],
+    );
+    if (typeof room?.notifyMemberLeft === "function") {
+      room.notifyMemberLeft(access.session.user, members);
+    }
   }
 
   return NextResponse.json({ ok: true });
 }
+
+export const POST = withJsonErrors("api.rooms.[code].leave.post", POSTHandler);

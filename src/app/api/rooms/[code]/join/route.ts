@@ -3,10 +3,13 @@ import { eq } from "drizzle-orm";
 import { db, isUsingLocalDb } from "@/db";
 import { roomMembers, rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
+import { getRedisPresence, publishRedisEvent } from "@/lib/collab/redisRealtime";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
 import { roomJoinLimiter } from "@/lib/rateLimit";
 import { isValidRoomCode, normalizeRoomCode } from "@/lib/roomCode";
 import { findRoomByCode, getMembership, listRoomMembers } from "@/lib/roomAccess";
 import { normalizeRoomTemplateMode } from "@/lib/roomTemplates";
+import { withJsonErrors } from "@/lib/apiErrors";
 import {
   createSession,
   createBearerToken,
@@ -17,6 +20,7 @@ import {
   type SessionUser,
 } from "@/lib/session";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string }> };
@@ -24,7 +28,7 @@ type RouteContext = { params: Promise<{ code: string }> };
 /**
  * POST /api/rooms/:code/join — idempotent membership grant. Accepts cookie OR bearer.
  */
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code: rawCode } = await ctx.params;
 
   const auth = await getAuthenticatedSessionFromRequest(request);
@@ -41,7 +45,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     issueBearer = createBearerToken(session.sessionId);
   }
 
-  if (!roomJoinLimiter.hit(session.user.id)) {
+  if (!(await roomJoinLimiter.hitAsync(session.user.id))) {
     return NextResponse.json(
       { error: "Too many join attempts. Slow down." },
       { status: 429 },
@@ -96,13 +100,19 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     insertedMembership = true;
   }
 
-  const activeRoom = await roomEngine.getRoom(code);
+  const useRedis = shouldUseRedisRealtime();
+  const activeRoom = useRedis ? null : await roomEngine.getRoom(code);
+  const activePresence = useRedis ? await getRedisPresence(code) : null;
   const members = await listRoomMembers(
     found.room.id,
-    activeRoom ? [...activeRoom.users.values()] : [],
+    activePresence ?? (activeRoom ? [...activeRoom.users.values()] : []),
   );
-  if (insertedMembership && typeof activeRoom?.notifyMemberJoined === "function") {
-    activeRoom.notifyMemberJoined(session.user, members);
+  if (insertedMembership) {
+    if (useRedis) {
+      await publishRedisEvent(code, { type: "member_join", user: session.user, members });
+    } else if (typeof activeRoom?.notifyMemberJoined === "function") {
+      activeRoom.notifyMemberJoined(session.user, members);
+    }
   }
 
   const responseBody: any = {
@@ -112,7 +122,7 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
       language: found.document.language,
       locked: Boolean(found.room.locked),
       templateMode: normalizeRoomTemplateMode(found.room.templateMode),
-      activeUsers: roomEngine.getActiveCount(code),
+      activeUsers: activePresence ? new Set(activePresence.map((presence) => presence.user.id)).size : roomEngine.getActiveCount(code),
     },
     members,
     role: grantedRole,
@@ -128,3 +138,5 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
   }
   return response;
 }
+
+export const POST = withJsonErrors("api.rooms.[code].join.post", POSTHandler);

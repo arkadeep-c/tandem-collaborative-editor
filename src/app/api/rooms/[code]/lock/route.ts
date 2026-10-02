@@ -3,14 +3,18 @@ import { eq } from "drizzle-orm";
 import { db, isUsingLocalDb } from "@/db";
 import { rooms } from "@/db/schema";
 import { roomEngine } from "@/lib/collab/rooms";
+import { updateRedisLocked } from "@/lib/collab/redisRealtime";
+import { shouldUseRedisRealtime } from "@/lib/deployment";
 import { requireRoomAccess } from "@/lib/roomAccess";
+import { withJsonErrors } from "@/lib/apiErrors";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ code: string }> };
 
 /** POST /api/rooms/:code/lock — owner-only lock/unlock joining. */
-export async function POST(request: NextRequest, ctx: RouteContext) {
+async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   const { code } = await ctx.params;
   const access = await requireRoomAccess(code, request, { ownerOnly: true });
   if (!access.ok) {
@@ -44,10 +48,16 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
     );
   }
 
-  const activeRoom = await roomEngine.getRoom(access.code);
-  if (typeof activeRoom?.setLocked === "function") {
-    activeRoom.setLocked(locked);
+  if (shouldUseRedisRealtime()) {
+    await updateRedisLocked(access.code, locked);
+  } else {
+    const activeRoom = await roomEngine.getRoom(access.code);
+    if (typeof activeRoom?.setLocked === "function") {
+      activeRoom.setLocked(locked);
+    }
   }
 
   return NextResponse.json({ ok: true, locked });
 }
+
+export const POST = withJsonErrors("api.rooms.[code].lock.post", POSTHandler);
