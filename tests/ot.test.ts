@@ -39,6 +39,14 @@ describe("op transforms", () => {
     expect(op).toEqual({ type: "insert", offset: 6, text: "x" });
   });
 
+  it("drops inserts inside a concurrently deleted span", () => {
+    const op = transformOp(
+      { type: "insert", offset: 3, text: "x" },
+      { type: "delete", offset: 1, length: 4 },
+    );
+    expect(op).toBeNull();
+  });
+
   it("shrinks deletes overlapping concurrent deletes", () => {
     const op = transformOp(
       { type: "delete", offset: 0, length: 10 },

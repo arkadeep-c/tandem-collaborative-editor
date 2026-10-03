@@ -169,9 +169,67 @@ let sessionBootstrapPromise: Promise<any> | null = null;
 let sessionBootstrapDone = false;
 let lastSessionData: any = null;
 
+function isSessionToken(value: unknown): value is string {
+  return typeof value === "string" && value.length > 10;
+}
+
+function makeSessionHeaders(token?: string | null): Headers {
+  const headers = new Headers({ Accept: "application/json" });
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return headers;
+}
+
+async function finalizeSessionBootstrap(data: any): Promise<any> {
+  if (!data || !data.user?.id) return data;
+
+  const bootstrapToken = isSessionToken(data.sessionToken) ? data.sessionToken : null;
+  const existingToken = getStoredToken();
+
+  // Existing valid bearer sessions are intentionally kept as a fallback. The
+  // server is cookie-first, so if a valid cookie is also present this response
+  // will not contain a bearer token and handleSessionResponse() will clear the
+  // stale stored one. If an old bearer was invalid and the server created a
+  // fresh bootstrap session, still verify cookie persistence before storing it.
+  if (existingToken && data.authMode === "bearer") {
+    handleSessionResponse(data, { allowBearerFallback: true });
+    return { ...data, bearerFallback: true };
+  }
+
+  if (!bootstrapToken) {
+    handleSessionResponse(data);
+    return { ...data, bearerFallback: Boolean(getStoredToken()) };
+  }
+
+  // A fresh bootstrap response includes a bearer token only so cookie-blocked
+  // browsers can recover. Verify whether the HttpOnly cookie persisted before
+  // storing that token; the verification sends the token too, avoiding a second
+  // anonymous session when cookies really are blocked.
+  const verifyRes = await fetch("/api/session", {
+    credentials: "include",
+    headers: makeSessionHeaders(bootstrapToken),
+  });
+  if (!verifyRes.ok) {
+    throw new Error(`session verify ${verifyRes.status}`);
+  }
+  const verified = await verifyRes.json();
+  if (!verified?.user?.id) {
+    throw new Error("Invalid session verification response: missing user");
+  }
+
+  if (verified.user.id === data.user.id && isSessionToken(verified.sessionToken)) {
+    handleSessionResponse(verified, { allowBearerFallback: true });
+    return { ...verified, bearerFallback: true };
+  }
+
+  // Cookie auth is working (or the server preferred an existing cookie). Do not
+  // retain the bootstrap bearer token in top-level first-party production.
+  handleSessionResponse(verified);
+  return { ...verified, bearerFallback: false };
+}
+
 export async function ensureClientSession(): Promise<any> {
-  if (sessionBootstrapDone && lastSessionData && getStoredToken()) {
-    console.log("[SESSION] SESSION_BOOTSTRAP_CACHE_HIT", { id: lastSessionData.user?.id?.slice(0, 8) });
+  if (sessionBootstrapDone && lastSessionData) {
+    console.log("[SESSION] SESSION_BOOTSTRAP_CACHE_HIT", { id: lastSessionData.user?.id?.slice(0, 8), bearer: !!getStoredToken() });
     return lastSessionData;
   }
   if (sessionBootstrapPromise) {
@@ -182,11 +240,14 @@ export async function ensureClientSession(): Promise<any> {
   console.log("[SESSION] SESSION_BOOTSTRAP_START");
   sessionBootstrapPromise = (async () => {
     try {
-      console.log("[SESSION] SESSION_BOOTSTRAP_REQUEST /api/session");
-      // Use raw fetch to avoid recursion — skipSessionBootstrap
+      const existingToken = getStoredToken();
+      console.log("[SESSION] SESSION_BOOTSTRAP_REQUEST /api/session", { hasExistingToken: !!existingToken });
+      // Use raw fetch to avoid recursion — skipSessionBootstrap. Include an
+      // existing bearer only to prevent duplicate sessions in cookie-blocked
+      // contexts; cookie auth remains primary on the server.
       const res = await fetch("/api/session", {
         credentials: "include",
-        headers: { Accept: "application/json" },
+        headers: makeSessionHeaders(existingToken),
       });
       console.log("[SESSION] SESSION_BOOTSTRAP_RESPONSE", { status: res.status });
       if (!res.ok) {
@@ -200,11 +261,11 @@ export async function ensureClientSession(): Promise<any> {
         throw new Error("Invalid session response: missing user");
       }
       console.log("[SESSION] SESSION_BOOTSTRAP_COMPLETE", { hasToken: !!data.sessionToken, fresh: data.fresh, id: data.user?.id?.slice(0, 8) });
-      handleSessionResponse(data);
-      console.log("[SESSION] SESSION_TOKEN_READY", { present: !!getStoredToken() });
-      lastSessionData = data;
+      const resolved = await finalizeSessionBootstrap(data);
+      console.log("[SESSION] SESSION_TOKEN_READY", { present: !!getStoredToken(), bearerFallback: !!resolved?.bearerFallback });
+      lastSessionData = resolved;
       sessionBootstrapDone = true;
-      return data;
+      return resolved;
     } catch (e) {
       console.error("[SESSION] SESSION_BOOTSTRAP_ERROR", e);
       sessionBootstrapPromise = null;
@@ -266,30 +327,33 @@ export async function apiFetch(
 
   let response = await fetch(input, mergedInit);
 
-  // 401 recovery for expired token (not for initial bootstrap race)
-  if (response.status === 401 && token && !isSessionRequest) {
-    console.warn("[AUTH] 401 with token, attempting refresh", { url: urlStr.slice(0, 80) });
-    clearStoredToken();
+  // One-shot 401 recovery for expired/missing cookie or bearer state.
+  if (response.status === 401 && !isSessionRequest) {
+    console.warn("[AUTH] 401, attempting session refresh", { url: urlStr.slice(0, 80), hadToken: !!token });
+    if (token) clearStoredToken();
     resetSessionBootstrap();
     try {
-      const refreshRes = await fetch("/api/session", { credentials: "include" });
+      const refreshRes = await fetch("/api/session", {
+        credentials: "include",
+        headers: makeSessionHeaders(),
+      });
       if (refreshRes.ok) {
         const refreshData = await refreshRes.json().catch(() => null);
-        if (refreshData?.sessionToken) {
-          storeToken(refreshData.sessionToken);
+        if (refreshData?.user) {
+          const resolved = await finalizeSessionBootstrap(refreshData);
           sessionBootstrapDone = true;
+          lastSessionData = resolved;
           const newToken = getStoredToken();
-          if (newToken) {
-            const retryHeaders = new Headers(init.headers || {});
-            retryHeaders.set("Authorization", `Bearer ${newToken}`);
-            const retryInit: RequestInit = {
-              ...restInit,
-              headers: retryHeaders,
-              credentials: "include",
-            };
-            console.log("[AUTH] retrying with new token", { url: urlStr.slice(0, 80) });
-            response = await fetch(input, retryInit);
-          }
+          const retryHeaders = new Headers(init.headers || {});
+          if (newToken) retryHeaders.set("Authorization", `Bearer ${newToken}`);
+          else retryHeaders.delete("Authorization");
+          const retryInit: RequestInit = {
+            ...restInit,
+            headers: retryHeaders,
+            credentials: "include",
+          };
+          console.log("[AUTH] retrying after session refresh", { url: urlStr.slice(0, 80), hasToken: !!newToken });
+          response = await fetch(input, retryInit);
         }
       }
     } catch (e) {
@@ -300,16 +364,33 @@ export async function apiFetch(
   return response;
 }
 
-export function handleSessionResponse(data: any): void {
+export function handleSessionResponse(
+  data: any,
+  options: { allowBearerFallback?: boolean; clearBearerOnCookieAuth?: boolean } = {},
+): void {
   if (data?.user?.id) {
     lastSessionData = { ...(lastSessionData ?? {}), ...data, user: data.user };
     sessionBootstrapDone = true;
   }
-  if (data && typeof data.sessionToken === "string" && data.sessionToken.length > 10) {
+
+  const token = isSessionToken(data?.sessionToken) ? data.sessionToken : null;
+  const shouldStoreBearer =
+    token &&
+    (options.allowBearerFallback ||
+      Boolean(getStoredToken()) ||
+      data?.bearerFallback === true ||
+      data?.authMode === "bearer");
+
+  if (shouldStoreBearer) {
     if (process.env.NODE_ENV === "development") {
-      console.log("[AUTH] handleSessionResponse storing token", { len: data.sessionToken.length });
+      console.log("[AUTH] handleSessionResponse storing bearer fallback token", { len: token.length });
     }
-    storeToken(data.sessionToken);
+    storeToken(token);
+    return;
+  }
+
+  if (data?.user?.id && options.clearBearerOnCookieAuth !== false) {
+    clearStoredToken();
   }
 }
 

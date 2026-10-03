@@ -159,6 +159,7 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
         sessionId: access.session.sessionId,
         language: payload.language,
         code: payload.sourceCode,
+        stdin: payload.stdin,
         signal: request.signal,
         onEvent: send,
       });

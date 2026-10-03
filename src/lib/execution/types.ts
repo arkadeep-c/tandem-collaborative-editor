@@ -74,7 +74,7 @@ export interface ExecutionLanguageAvailability {
 
 export interface ExecutionAvailability {
   configured: boolean;
-  backend: "docker" | "linux-namespace" | null;
+  backend: "docker" | "linux-namespace" | "piston" | null;
   productionSafe: boolean;
   message?: string;
   languages: Record<ExecutionLanguage, ExecutionLanguageAvailability>;

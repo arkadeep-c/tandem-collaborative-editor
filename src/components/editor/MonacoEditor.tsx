@@ -392,7 +392,7 @@ export default function MonacoEditor({
     if (monaco) {
       monaco.editor.setModelLanguage(model, monacoLanguageFor(language));
     }
-    ed.updateOptions({ 
+    ed.updateOptions({
       wordWrap: wordWrap ?? (language === "markdown" ? "on" : "off"),
       fontSize,
       minimap: { enabled: minimap },

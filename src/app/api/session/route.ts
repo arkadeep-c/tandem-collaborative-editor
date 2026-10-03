@@ -42,6 +42,10 @@ export async function GET(request: NextRequest) {
         // If cookie not valid (authenticated via bearer), return bearer token for client storage
         if (!auth.cookieValid) {
           responseBody.sessionToken = createBearerToken(auth.session.sessionId);
+          responseBody.bearerFallback = true;
+          responseBody.authMode = "bearer";
+        } else {
+          responseBody.authMode = "cookie";
         }
         return NextResponse.json(responseBody);
       }
@@ -56,6 +60,8 @@ export async function GET(request: NextRequest) {
         },
         fresh: true,
         sessionToken: bearer,
+        authMode: "bootstrap",
+        cookieVerificationRequired: true,
       });
       response.cookies.set(
         SESSION_COOKIE,
@@ -132,6 +138,10 @@ export async function PATCH(request: NextRequest) {
       };
       if (!auth.cookieValid) {
         responseBody.sessionToken = createBearerToken(session.sessionId);
+        responseBody.bearerFallback = true;
+        responseBody.authMode = "bearer";
+      } else {
+        responseBody.authMode = "cookie";
       }
 
       return NextResponse.json(responseBody);

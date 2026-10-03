@@ -26,6 +26,17 @@ interface PresenceBarProps {
 
 const MAX_VISIBLE = 6;
 
+export function distinctPresenceConnections(
+  users: PresenceState[],
+): PresenceState[] {
+  return Array.from(
+    users.reduce((map, presence) => {
+      map.set(presence.sessionId, presence);
+      return map;
+    }, new Map<string, PresenceState>()).values(),
+  ).sort((a, b) => a.joinedAt - b.joinedAt);
+}
+
 export default function PresenceBar({
   users,
   selfSessionId,
@@ -33,19 +44,7 @@ export default function PresenceBar({
   onEditProfile,
 }: PresenceBarProps) {
   const [hovered, setHovered] = useState<string | null>(null);
-  const deduped = Array.from(
-    users.reduce((map, presence) => {
-      const existing = map.get(presence.user.id);
-      if (
-        !existing ||
-        presence.sessionId === selfSessionId ||
-        presence.lastActiveAt > existing.lastActiveAt
-      ) {
-        map.set(presence.user.id, presence);
-      }
-      return map;
-    }, new Map<string, PresenceState>()).values(),
-  ).sort((a, b) => a.joinedAt - b.joinedAt);
+  const deduped = distinctPresenceConnections(users);
   const visible = deduped.slice(0, MAX_VISIBLE);
   const overflow = deduped.length - visible.length;
 
@@ -55,7 +54,7 @@ export default function PresenceBar({
         {visible.map((presence) => {
           const isSelf =
             presence.sessionId === selfSessionId ||
-            Boolean(selfUserId && presence.user.id === selfUserId);
+            Boolean(!selfSessionId && selfUserId && presence.user.id === selfUserId);
           const isRemoteTyping = !isSelf && presence.typing;
           return (
             <div

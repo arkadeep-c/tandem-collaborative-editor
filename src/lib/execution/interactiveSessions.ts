@@ -29,6 +29,7 @@ export interface ExecutionSession extends ExecutionOwner {
 interface StartExecutionSessionOptions extends ExecutionOwner {
   language: ExecutionLanguage;
   code: string;
+  stdin?: string;
   signal?: AbortSignal;
   onEvent?: (event: ExecutionStreamEvent) => void;
 }

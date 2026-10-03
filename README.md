@@ -214,12 +214,25 @@ Tandem runs containers with no network, memory/pid/CPU limits, read-only root,
 and a disposable workspace mount.
 
 Vercel's Next.js runtime does not provide a colocated Docker daemon for arbitrary
-code execution. On Vercel, leave `TANDEM_EXECUTION_BACKEND=disabled` unless you
-add a separate isolated execution service. If no backend is available, execution
-fails closed with a clean `unavailable` message and the editor/collaboration
-product continues to work. The Linux namespace backend is only available through
-explicit local opt-in (`TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR=true`) and is not a
-Vercel production sandbox.
+code execution. For production, configure a private Piston-compatible isolated
+executor service and set:
+
+```env
+TANDEM_EXECUTION_BACKEND=piston
+TANDEM_PISTON_API_URL=https://your-private-piston-service.example.com
+```
+
+The Piston backend is selected through the same Tandem execution API and supports
+the executable Tandem language set (`c`, `cpp`, `java`, `python`, `javascript`,
+`typescript`, and `bash`) when those runtimes are installed in the executor
+service. Tandem sends code/stdin to that external sandbox over HTTPS and keeps
+timeouts, memory/output limits, and diagnostics normalization on the app side;
+the sandbox service remains responsible for process/filesystem/network isolation
+and cleanup. If no backend is available, execution fails closed with a clean
+`unavailable` message and the editor/collaboration product continues to work.
+The Linux namespace backend is only available through explicit local opt-in
+(`TANDEM_ENABLE_LINUX_NAMESPACE_EXECUTOR=true`) and is not a Vercel production
+sandbox.
 
 ---
 
@@ -325,8 +338,8 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
 REDIS_URL=redis://USER:PASSWORD@HOST:PORT
 SESSION_SECRET=<32-byte-or-longer-random-secret>
 SESSION_COOKIE_SECURE=true
-SESSION_COOKIE_SAMESITE=none
-SESSION_COOKIE_PARTITIONED=true
+SESSION_COOKIE_SAMESITE=lax
+SESSION_COOKIE_PARTITIONED=false
 ```
 
 Optional production variables:
@@ -337,10 +350,9 @@ TANDEM_EXECUTION_BACKEND=disabled
 POSTGRES_POOL_MAX=1
 ```
 
-`SameSite=None` + `Partitioned` is useful for embedded/cross-site preview
-contexts. For a plain same-origin custom domain, `SameSite=Lax` can also work,
-but the existing deployment-safe default remains the stricter HTTPS-compatible
-configuration above.
+`SameSite=Lax` is the production default for the normal top-level first-party
+Vercel site. `SameSite=None` + `Partitioned` remains available as an explicit
+override for actual embedded/cross-site preview iframe contexts.
 
 ### 4. Run migrations safely
 
@@ -409,11 +421,12 @@ npm run db:migrate
 | `REDIS_URL` | Yes | Shared realtime state, pub/sub, presence, locks, rate limits |
 | `SESSION_SECRET` | Yes | Signed session cookies and bearer fallback |
 | `SESSION_COOKIE_SECURE=true` | Yes | HTTPS-only session cookie |
-| `SESSION_COOKIE_SAMESITE=none` | Recommended | Cross-site/embedded compatibility |
-| `SESSION_COOKIE_PARTITIONED=true` | Recommended | CHIPS/embedded preview compatibility |
+| `SESSION_COOKIE_SAMESITE=lax` | Recommended | First-party top-level production cookie behavior |
+| `SESSION_COOKIE_PARTITIONED=false` | Recommended | Avoids CHIPS/Partitioned cookies unless truly embedded |
 | `APP_URL` | No | Canonical deployment URL for diagnostics/docs |
 | `POSTGRES_POOL_MAX` | No | Connection pool cap; `1` is recommended on Vercel |
-| `TANDEM_EXECUTION_BACKEND` | No | `disabled` on Vercel unless an external isolated backend exists |
+| `TANDEM_EXECUTION_BACKEND` | No | `disabled`, `docker`, or `piston`; use `piston` on Vercel only with an isolated executor service |
+| `TANDEM_PISTON_API_URL` | For `piston` | HTTPS base URL of the private Piston-compatible execution sandbox |
 | `TANDEM_EXECUTION_IMAGE` | Local only | Docker image for local/container execution sandbox |
 | `USE_LOCAL_DEV_DB=true` | Local/ephemeral preview only | Enables SQLite fallback outside production |
 | `SQLITE_DB_PATH` | Local only | SQLite path, default `./data/tandem.db` |

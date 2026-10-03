@@ -5,6 +5,7 @@ import { join } from "path";
 import { tmpdir, platform } from "os";
 import {
   EXECUTABLE_LANGUAGES,
+  executionLabel,
   type ExecutionAvailability,
   type ExecutionLanguage,
   type ExecutionProblem,
@@ -244,6 +245,7 @@ export interface InteractiveExecutionHandle {
 
 export interface InteractiveExecutionOptions {
   signal?: AbortSignal;
+  stdin?: string;
   onEvent?: (event: ExecutionStreamEvent) => void;
 }
 
@@ -999,9 +1001,7 @@ async function resolveBackend(
     command: string,
   ) => Promise<boolean> = commandExists,
 ): Promise<SandboxBackend | null> {
-  const requested = (
-    process.env.TANDEM_EXECUTION_BACKEND || "auto"
-  ).toLowerCase();
+  const requested = requestedExecutionBackend();
 
   if (requested === "disabled" || requested === "none") {
     return null;
@@ -1043,7 +1043,53 @@ async function resolveBackend(
 }
 
 function backendUnavailableMessage(): string {
-  return "Code execution is unavailable because no supported isolated execution runtime is configured. Use TANDEM_EXECUTION_BACKEND=docker with TANDEM_EXECUTION_IMAGE on a host that provides Docker, or keep execution disabled on Vercel until a separate isolated execution service is added. Unsafe host execution is disabled.";
+  return "Code execution is unavailable because no supported isolated execution runtime is configured. Use TANDEM_EXECUTION_BACKEND=docker with TANDEM_EXECUTION_IMAGE on a host that provides Docker, or TANDEM_EXECUTION_BACKEND=piston with TANDEM_PISTON_API_URL pointing at an isolated Piston-compatible execution service. Unsafe host execution is disabled.";
+}
+
+function requestedExecutionBackend(): string {
+  return (process.env.TANDEM_EXECUTION_BACKEND || "auto").toLowerCase();
+}
+
+function pistonApiBaseUrl(): string | null {
+  const raw = process.env.TANDEM_PISTON_API_URL || process.env.PISTON_API_URL;
+  if (!raw) return null;
+  try {
+    return new URL(raw).toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function pistonConfigurationError(): string | null {
+  const raw = process.env.TANDEM_PISTON_API_URL || process.env.PISTON_API_URL;
+  if (!raw) return pistonUnavailableMessage();
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return "Piston execution is selected but TANDEM_PISTON_API_URL is not a valid URL.";
+  }
+
+  const productionDeployment =
+    process.env.APP_ENV === "production" ||
+    process.env.VERCEL_ENV === "production" ||
+    Boolean(process.env.VERCEL);
+
+  if (productionDeployment && parsed.protocol !== "https:") {
+    return "Piston execution requires an HTTPS TANDEM_PISTON_API_URL in production.";
+  }
+
+  return null;
+}
+
+function pistonRequested(): boolean {
+  const requested = requestedExecutionBackend();
+  return requested === "piston" || requested === "piston-http";
+}
+
+function pistonUnavailableMessage(): string {
+  return "Piston execution is selected but TANDEM_PISTON_API_URL is not configured. Configure it with the HTTPS base URL of a private, isolated Piston-compatible sandbox service.";
 }
 
 function shellQuote(value: string): string {
@@ -1226,6 +1272,10 @@ export async function getExecutionAvailability(
     ]),
   ) as ExecutionAvailability["languages"];
 
+  if (pistonRequested()) {
+    return getPistonAvailability();
+  }
+
   const hostCommandExists =
     probeOverrides.commandExists ?? commandExists;
 
@@ -1337,6 +1387,307 @@ const EXECUTION_TOOL_REQUIREMENTS: Record<
   typescript: ["node"],
   bash: ["bash"],
 };
+
+interface PistonRuntime {
+  language: string;
+  version: string;
+  aliases?: string[];
+}
+
+interface PistonStage {
+  stdout?: string;
+  stderr?: string;
+  output?: string;
+  code?: number | null;
+  signal?: string | null;
+}
+
+interface PistonExecuteResponse {
+  run?: PistonStage;
+  compile?: PistonStage;
+  message?: string;
+}
+
+const PISTON_LANGUAGE_ALIASES: Record<ExecutionLanguage, string[]> = {
+  c: ["c", "gcc"],
+  cpp: ["c++", "cpp", "g++"],
+  java: ["java"],
+  python: ["python3", "python"],
+  javascript: ["javascript", "node", "nodejs"],
+  typescript: ["typescript", "ts"],
+  bash: ["bash", "sh"],
+};
+
+function pistonFilename(language: ExecutionLanguage): string {
+  switch (language) {
+    case "c":
+      return "main.c";
+    case "cpp":
+      return "main.cpp";
+    case "java":
+      return JAVA_SOURCE_FILENAME;
+    case "python":
+      return "main.py";
+    case "javascript":
+      return "main.js";
+    case "typescript":
+      return "main.ts";
+    case "bash":
+      return "main.sh";
+  }
+}
+
+function stageText(stage: PistonStage | undefined, stream: "stdout" | "stderr"): string {
+  if (!stage) return "";
+  const direct = stream === "stdout" ? stage.stdout : stage.stderr;
+  if (direct) return direct;
+  return stage.output ?? "";
+}
+
+function limitPistonOutput(text: string): { text: string; truncated: boolean } {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= OUTPUT_LIMIT_BYTES) return { text, truncated: false };
+  const truncated = Buffer.from(text, "utf8")
+    .subarray(0, OUTPUT_LIMIT_BYTES)
+    .toString("utf8")
+    .replace(/\uFFFD$/u, "");
+  return {
+    text: `${truncated}\n[Output truncated: exceeded 1MB limit]`,
+    truncated: true,
+  };
+}
+
+async function fetchPistonRuntimes(
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<PistonRuntime[]> {
+  const response = await fetch(`${baseUrl}/api/v2/runtimes`, {
+    headers: { Accept: "application/json" },
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`Piston runtime probe failed with HTTP ${response.status}.`);
+  }
+  const data = (await response.json().catch(() => [])) as unknown;
+  if (!Array.isArray(data)) return [];
+  return data.filter((runtime): runtime is PistonRuntime => {
+    if (!runtime || typeof runtime !== "object") return false;
+    const candidate = runtime as Partial<PistonRuntime>;
+    return (
+      typeof candidate.language === "string" &&
+      typeof candidate.version === "string" &&
+      (candidate.aliases === undefined ||
+        (Array.isArray(candidate.aliases) &&
+          candidate.aliases.every((alias) => typeof alias === "string")))
+    );
+  });
+}
+
+function findPistonRuntime(
+  runtimes: readonly PistonRuntime[],
+  language: ExecutionLanguage,
+): PistonRuntime | null {
+  const accepted = new Set(PISTON_LANGUAGE_ALIASES[language].map((item) => item.toLowerCase()));
+  return (
+    runtimes.find((runtime) => {
+      const names = [runtime.language, ...(runtime.aliases ?? [])].map((item) =>
+        item.toLowerCase(),
+      );
+      return names.some((name) => accepted.has(name));
+    }) ?? null
+  );
+}
+
+async function getPistonAvailability(): Promise<ExecutionAvailability> {
+  const languages = Object.fromEntries(
+    EXECUTABLE_LANGUAGES.map((language) => [
+      language,
+      { ready: false, reason: pistonUnavailableMessage() },
+    ]),
+  ) as ExecutionAvailability["languages"];
+
+  const configError = pistonConfigurationError();
+  const baseUrl = pistonApiBaseUrl();
+  if (configError || !baseUrl) {
+    return {
+      configured: false,
+      backend: "piston",
+      productionSafe: true,
+      message: configError ?? pistonUnavailableMessage(),
+      languages: Object.fromEntries(
+        EXECUTABLE_LANGUAGES.map((language) => [
+          language,
+          { ready: false, reason: configError ?? pistonUnavailableMessage() },
+        ]),
+      ) as ExecutionAvailability["languages"],
+    };
+  }
+
+  try {
+    const runtimes = await fetchPistonRuntimes(baseUrl);
+    for (const language of EXECUTABLE_LANGUAGES) {
+      const runtime = findPistonRuntime(runtimes, language);
+      languages[language] = runtime
+        ? { ready: true }
+        : {
+            ready: false,
+            reason: `Piston runtime missing for ${executionLabel(language)}.`,
+          };
+    }
+
+    return {
+      configured: Object.values(languages).some((entry) => entry.ready),
+      backend: "piston",
+      productionSafe: true,
+      languages,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Piston runtime probe failed.";
+    for (const language of EXECUTABLE_LANGUAGES) {
+      languages[language] = { ready: false, reason: message };
+    }
+    return {
+      configured: false,
+      backend: "piston",
+      productionSafe: true,
+      message,
+      languages,
+    };
+  }
+}
+
+async function executePistonCode(
+  language: ExecutionLanguage,
+  code: string,
+  stdin = "",
+  signal?: AbortSignal,
+  start = Date.now(),
+): Promise<ExecutionResult> {
+  const configError = pistonConfigurationError();
+  const baseUrl = pistonApiBaseUrl();
+  if (configError || !baseUrl) {
+    return unavailable(configError ?? pistonUnavailableMessage(), start);
+  }
+
+  if (signal?.aborted) return cancelled(start);
+
+  const runtimes = await fetchPistonRuntimes(baseUrl, signal);
+  const runtime = findPistonRuntime(runtimes, language);
+  if (!runtime) {
+    return unavailable(
+      `Piston execution is configured but no ${executionLabel(language)} runtime is available.`,
+      start,
+    );
+  }
+
+  const source = language === "bash" ? normalizeBashSourceLineEndings(code) : code;
+  const response = await fetch(`${baseUrl}/api/v2/execute`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    signal,
+    body: JSON.stringify({
+      language: runtime.language,
+      version: runtime.version,
+      files: [{ name: pistonFilename(language), content: source }],
+      stdin,
+      compile_timeout: language === "java" ? JAVA_COMPILE_TIMEOUT_MS : COMPILE_TIMEOUT_MS,
+      run_timeout: getExecutionTimeoutMs(),
+      compile_memory_limit: MEMORY_LIMIT_BYTES,
+      run_memory_limit: MEMORY_LIMIT_BYTES,
+    }),
+  });
+
+  if (signal?.aborted) return cancelled(start);
+
+  if (!response.ok) {
+    return unavailable(
+      `Piston execution request failed with HTTP ${response.status}.`,
+      start,
+    );
+  }
+
+  const parsed = (await response.json().catch(() => null)) as unknown;
+  if (!parsed || typeof parsed !== "object") {
+    return baseResult(
+      "execution_error",
+      "Execution sandbox returned a malformed response.",
+      Date.now() - start,
+    );
+  }
+
+  const data = parsed as PistonExecuteResponse;
+  const compileStdout = stageText(data.compile, "stdout");
+  const compileStderr = stageText(data.compile, "stderr");
+  const runStdout = stageText(data.run, "stdout");
+  const runStderr = stageText(data.run, "stderr");
+  const limitedStdout = limitPistonOutput(`${compileStdout}${runStdout}`);
+  const limitedStderr = limitPistonOutput(`${compileStderr}${runStderr}`);
+  const outputTruncated = limitedStdout.truncated || limitedStderr.truncated;
+
+  if (data.compile && (data.compile.code ?? 0) !== 0) {
+    const stderr = limitedStderr.text || data.compile.output || "Compilation failed.";
+    const filename = pistonFilename(language);
+    const problems =
+      language === "java"
+        ? parseJavaErrors(stderr, filename)
+        : language === "c" || language === "cpp"
+          ? parseCppErrors(stderr, filename)
+          : language === "typescript"
+            ? parseJsErrors(stderr, filename)
+            : [];
+    return {
+      status: outputTruncated ? "output_limit" : "compile_error",
+      stdout: limitedStdout.text,
+      stderr,
+      exitCode: data.compile.code ?? 1,
+      duration: Date.now() - start,
+      compilationOutput: stderr,
+      problems,
+      outputTruncated,
+    };
+  }
+
+  const run = data.run ?? {};
+  const stdout = limitedStdout.text;
+  const stderr = limitedStderr.text;
+  const signalName = run.signal ?? "";
+  const timedOut = /TIME|KILL|XCPU/i.test(signalName);
+  const exitCode = run.code ?? null;
+  const status: ExecutionResult["status"] = outputTruncated
+    ? "output_limit"
+    : timedOut
+      ? "timeout"
+      : exitCode === 0
+        ? "success"
+        : "runtime_error";
+  const filename = pistonFilename(language);
+  const problems =
+    language === "python"
+      ? parsePythonErrors(stderr, filename)
+      : language === "java"
+        ? parseJavaRuntimeErrors(stderr, filename)
+        : language === "javascript" || language === "typescript"
+          ? parseJsErrors(stderr, filename)
+          : language === "bash"
+            ? parseBashErrors(stderr, filename)
+            : language === "c" || language === "cpp"
+              ? parseCppErrors(stderr, filename)
+              : [];
+
+  return {
+    status,
+    stdout,
+    stderr,
+    exitCode,
+    duration: Date.now() - start,
+    problems,
+    timedOut,
+    outputTruncated,
+  };
+}
 
 async function requireTools(
   language: ExecutionLanguage,
@@ -1854,6 +2205,10 @@ export async function executeCode(
     );
   }
 
+  if (pistonRequested()) {
+    return executePistonCode(language, code, stdin, signal, start);
+  }
+
   const backend = await resolveBackend();
 
   if (!backend) {
@@ -2276,7 +2631,8 @@ export function startInteractiveExecution(
   const controller = new AbortController();
   let activeProcess: InteractiveProcess | null = null;
   let completed = false;
-  const pendingStdin: string[] = [];
+  let acceptsBufferedStdin = true;
+  const pendingStdin: string[] = options.stdin ? [options.stdin] : [];
 
   const emit = (event: ExecutionStreamEvent) => {
     try {
@@ -2323,6 +2679,22 @@ export function startInteractiveExecution(
             Date.now() - start,
           ),
         );
+      }
+
+      if (pistonRequested()) {
+        emit({ type: "status", status: "running", message: "Running in remote sandbox..." });
+        const initialStdin = pendingStdin.splice(0).join("");
+        acceptsBufferedStdin = false;
+        const remoteResult = await executePistonCode(
+          language,
+          code,
+          initialStdin,
+          controller.signal,
+          start,
+        );
+        if (remoteResult.stdout) emit({ type: "stdout", chunk: remoteResult.stdout });
+        if (remoteResult.stderr) emit({ type: "stderr", chunk: remoteResult.stderr });
+        return finishResult(remoteResult);
       }
 
       const backend = await resolveBackend();
@@ -2646,6 +3018,8 @@ export function startInteractiveExecution(
       if (activeProcess) {
         return activeProcess.writeStdin(chunk);
       }
+
+      if (!acceptsBufferedStdin) return false;
 
       pendingStdin.push(chunk);
       return true;
