@@ -11,3 +11,6 @@ data/
 *.db
 *.db-shm
 *.db-wal
+
+.vercel/
+production-realtime-fix.patch
