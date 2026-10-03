@@ -66,6 +66,41 @@ function roleForSelf(members: RoomMemberInfo[], userId?: string): RoomRole | nul
   return members.find((member) => member.user.id === userId)?.role ?? null;
 }
 
+function sameOp(a: TextOp, b: TextOp): boolean {
+  if (a.type !== b.type || a.offset !== b.offset) return false;
+  return a.type === "insert" && b.type === "insert"
+    ? a.text === b.text
+    : a.type === "delete" && b.type === "delete"
+      ? a.length === b.length
+      : false;
+}
+
+function dropMatchingPrefix(ops: TextOp[], acknowledged: TextOp[]): TextOp[] {
+  let index = 0;
+  while (index < acknowledged.length && index < ops.length && sameOp(ops[index]!, acknowledged[index]!)) {
+    index += 1;
+  }
+  return index > 0 ? ops.slice(index) : ops;
+}
+
+function replayLocalOpsOnSnapshot(content: string, ops: TextOp[]): {
+  content: string;
+  ops: TextOp[];
+} {
+  let nextContent = content;
+  const replayed: TextOp[] = [];
+  for (const op of ops) {
+    const valid =
+      op.type === "insert"
+        ? op.offset >= 0 && op.offset <= nextContent.length
+        : op.offset >= 0 && op.length >= 0 && op.offset + op.length <= nextContent.length;
+    if (!valid) continue;
+    nextContent = applyOp(nextContent, op);
+    replayed.push(op);
+  }
+  return { content: nextContent, ops: replayed };
+}
+
 export function useCollaborativeDocument(roomCode: string) {
   const [state, setState] = useState<CollabState>({
     connection: "connecting",
@@ -136,19 +171,43 @@ export function useCollaborativeDocument(roomCode: string) {
           revision: number;
           content: string;
         };
+        const pending = [
+          ...(outstandingRef.current ?? []),
+          ...bufferRef.current,
+        ];
+        const replayed = replayLocalOpsOnSnapshot(stale.content, pending);
         outstandingRef.current = null;
-        bufferRef.current = [];
+        bufferRef.current = replayed.ops;
         revisionRef.current = stale.revision;
-        snapshotRef.current = { content: stale.content };
-        bridgeRef.current?.reset(stale.content);
-        patchState({ revision: stale.revision, syncedRevision: stale.revision, unsent: false });
+        snapshotRef.current = { content: replayed.content };
+        bridgeRef.current?.reset(replayed.content);
+        patchState({
+          revision: stale.revision,
+          syncedRevision: stale.revision,
+          unsent: replayed.ops.length > 0,
+        });
+        if (replayed.ops.length > 0) {
+          sourceRef.current?.close();
+          sourceRef.current = null;
+          fetchControllerRef.current?.abort();
+          fetchControllerRef.current = null;
+          patchState({ connection: "reconnecting" });
+          reconnectTimerRef.current = setTimeout(
+            () => void openStreamRef.current(),
+            RECONNECT_DELAY_MS,
+          );
+        }
         return;
       }
       if (!res.ok) throw new Error(`operations failed: ${res.status}`);
     } catch {
+      const pending = [
+        ...(outstandingRef.current ?? []),
+        ...bufferRef.current,
+      ];
       outstandingRef.current = null;
-      bufferRef.current = [];
-      patchState({ unsent: false });
+      bufferRef.current = pending;
+      patchState({ unsent: pending.length > 0 });
       sourceRef.current?.close();
       sourceRef.current = null;
       fetchControllerRef.current?.abort();
@@ -178,11 +237,23 @@ export function useCollaborativeDocument(roomCode: string) {
           failuresRef.current = 0;
           connectionIdRef.current = event.sessionId;
           selfUserIdRef.current = event.you.user.id;
+          const pending = [
+            ...(outstandingRef.current ?? []),
+            ...bufferRef.current,
+          ];
+          const previousSnapshot = snapshotRef.current?.content ?? null;
+          const serverAlreadyIncludesPending =
+            previousSnapshot !== null &&
+            pending.length > 0 &&
+            replayLocalOpsOnSnapshot(previousSnapshot, pending).content === event.content;
+          const replayed = serverAlreadyIncludesPending
+            ? { content: event.content, ops: [] as TextOp[] }
+            : replayLocalOpsOnSnapshot(event.content, pending);
           revisionRef.current = event.revision;
           outstandingRef.current = null;
-          bufferRef.current = [];
-          snapshotRef.current = { content: event.content };
-          bridgeRef.current?.reset(event.content);
+          bufferRef.current = replayed.ops;
+          snapshotRef.current = { content: replayed.content };
+          bridgeRef.current?.reset(replayed.content);
           setState((prev) => ({
             ...prev,
             connection: "connected",
@@ -198,7 +269,7 @@ export function useCollaborativeDocument(roomCode: string) {
             revision: event.revision,
             syncedRevision: event.revision,
             cacheMode: event.cacheMode,
-            unsent: false,
+            unsent: replayed.ops.length > 0,
           }));
           break;
         }
@@ -210,7 +281,11 @@ export function useCollaborativeDocument(roomCode: string) {
           }
           if (event.by === connectionIdRef.current) {
             revisionRef.current = event.revision;
-            outstandingRef.current = null;
+            if (outstandingRef.current) {
+              outstandingRef.current = null;
+            } else {
+              bufferRef.current = dropMatchingPrefix(bufferRef.current, event.ops);
+            }
             setState((prev) => ({
               ...prev,
               revision: event.revision,
