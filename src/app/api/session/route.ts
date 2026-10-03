@@ -38,9 +38,10 @@ export async function GET(request: NextRequest) {
             color: auth.session.user.color,
           },
           fresh: false,
+          authMode: auth.via,
+          cookieVerificationRequired: false,
         };
-        // If cookie not valid (authenticated via bearer), return bearer token for client storage
-        if (!auth.cookieValid) {
+        if (auth.via === "bearer") {
           responseBody.sessionToken = createBearerToken(auth.session.sessionId);
         }
         return NextResponse.json(responseBody);
@@ -55,6 +56,8 @@ export async function GET(request: NextRequest) {
           color: created.user.color,
         },
         fresh: true,
+        authMode: "bootstrap",
+        cookieVerificationRequired: true,
         sessionToken: bearer,
       });
       response.cookies.set(
@@ -129,8 +132,9 @@ export async function PATCH(request: NextRequest) {
 
       const responseBody: any = {
         user: { id: user!.id, name: user!.name, color: user!.color },
+        authMode: auth.via,
       };
-      if (!auth.cookieValid) {
+      if (auth.via === "bearer") {
         responseBody.sessionToken = createBearerToken(session.sessionId);
       }
 
