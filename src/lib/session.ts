@@ -9,7 +9,7 @@ import { PRESENCE_COLORS } from "@/lib/validation";
 /**
  * Server-managed anonymous sessions.
  *
- * PRIMARY: HttpOnly signed session cookie (Secure, SameSite=None, Partitioned in preview/prod)
+ * PRIMARY: HttpOnly signed session cookie (first-party SameSite=Lax by default; explicit None+Partitioned only for embedded previews)
  * FALLBACK: Signed bearer token (sessionStorage) for iframe contexts where cookies are blocked
  *
  *  - The server creates the user (random UUID) AND the session token.
@@ -372,7 +372,7 @@ function getCookieConfig(): CookieConfig {
       sameSite = secure ? "none" : "lax";
     }
   } else {
-    sameSite = secure ? "none" : "lax";
+    sameSite = "lax";
   }
 
   if (sameSite === "none") {
@@ -382,7 +382,7 @@ function getCookieConfig(): CookieConfig {
   if (partitionedEnv !== undefined) {
     partitioned = partitionedEnv.toLowerCase() === "true";
   } else {
-    partitioned = secure && sameSite === "none";
+    partitioned = false;
   }
 
   if (partitioned) {
