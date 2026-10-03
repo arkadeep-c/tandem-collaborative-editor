@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto";
-import { eq } from "drizzle-orm";
+import { and, eq, lte } from "drizzle-orm";
 import { db } from "@/db";
 import { documents, rooms } from "@/db/schema";
 import { createRedisSubscriber, getRedisClient } from "@/lib/collab/store";
@@ -319,103 +319,203 @@ export async function redisConnectionBelongsTo(
   }
 }
 
+interface RedisOperationResult {
+  revision: number;
+  ops: TextOp[];
+  content: string;
+  clientMutationId?: string;
+  savedAt?: string;
+  duplicate?: boolean;
+}
+
+interface PersistenceSnapshot {
+  content: string;
+  revision: number;
+  clientMutationId?: string;
+}
+
+type LockedRedisOperationResult =
+  | { stale: true; revision: number; content: string }
+  | { result: RedisOperationResult; persistence?: PersistenceSnapshot };
+
+async function markMutationSaved(
+  access: Extract<Access, { ok: true }>,
+  clientMutationId: string,
+  revision: number,
+  savedAt: string,
+): Promise<{ savedAt: string; newlyConfirmed: boolean }> {
+  return withRoomLock(access.code, async () => {
+    const state = await loadRoomState(access);
+    const mutation = state.recentMutations.find(
+      (item) => item.id === clientMutationId && item.revision === revision,
+    );
+
+    // The mutation log is bounded. If this entry was pruned after the durable
+    // write completed, the guarded database update below is still authoritative.
+    if (!mutation) return { savedAt, newlyConfirmed: true };
+    if (mutation.savedAt) {
+      return { savedAt: mutation.savedAt, newlyConfirmed: false };
+    }
+
+    mutation.savedAt = savedAt;
+    await saveRoomState(access.code, state);
+    return { savedAt, newlyConfirmed: true };
+  });
+}
+
 export async function applyRedisOperations(
   access: Extract<Access, { ok: true }>,
   connectionId: string,
   baseRevision: number,
   ops: TextOp[],
   clientMutationId?: string,
-): Promise<
-  | {
-      revision: number;
-      ops: TextOp[];
-      content: string;
-      clientMutationId?: string;
-      savedAt?: string;
-      duplicate?: boolean;
-    }
-  | { stale: true; revision: number; content: string }
-> {
+): Promise<RedisOperationResult | { stale: true; revision: number; content: string }> {
   if (!(await redisConnectionBelongsTo(access.code, connectionId, access.session.user.id))) {
     throw new Error("UNAUTHORIZED_CONNECTION");
   }
 
-  return withRoomLock(access.code, async () => {
-    const state = await loadRoomState(access);
-    if (clientMutationId) {
-      const prior = state.recentMutations.find((item) => item.id === clientMutationId);
-      if (prior) {
-        await refreshRedisPresence(access.code, connectionId).catch(() => undefined);
-        return {
-          revision: prior.revision,
-          ops: prior.ops,
-          content: prior.content,
-          clientMutationId,
-          savedAt: prior.savedAt,
-          duplicate: true,
-        };
+  // The critical section contains only Redis state changes and live delivery.
+  // A database write can be slow in a serverless region, so it must never hold
+  // the room lock or delay the op event that drives remote editors.
+  const lockedResult: LockedRedisOperationResult = await withRoomLock(
+    access.code,
+    async () => {
+      const state = await loadRoomState(access);
+      if (clientMutationId) {
+        const prior = state.recentMutations.find((item) => item.id === clientMutationId);
+        if (prior) {
+          return {
+            result: {
+              revision: prior.revision,
+              ops: prior.ops,
+              content: prior.content,
+              clientMutationId,
+              savedAt: prior.savedAt,
+              duplicate: true,
+            },
+            // A request may have been accepted and published just before its
+            // original durable write failed. Retry that exact snapshot without
+            // applying or publishing the mutation a second time.
+            persistence: prior.savedAt
+              ? undefined
+              : {
+                  content: prior.content,
+                  revision: prior.revision,
+                  clientMutationId,
+                },
+          };
+        }
       }
-    }
 
-    if (baseRevision > state.revision || baseRevision < state.revision - state.opLog.length) {
-      return { stale: true as const, revision: state.revision, content: state.content };
-    }
+      if (baseRevision > state.revision || baseRevision < state.revision - state.opLog.length) {
+        return { stale: true as const, revision: state.revision, content: state.content };
+      }
 
-    const base = state.revision - state.opLog.length;
-    const missed = state.opLog.slice(baseRevision - base).map((entry) => entry.op);
-    const applied: TextOp[] = [];
+      const base = state.revision - state.opLog.length;
+      const missed = state.opLog.slice(baseRevision - base).map((entry) => entry.op);
+      const applied: TextOp[] = [];
 
-    for (const op of rebaseSequentialOps(ops, missed)) {
-      if (!opWithinBounds(op, state.content.length)) continue;
-      state.content = applyOp(state.content, op);
-      state.revision += 1;
-      state.opLog.push({ revision: state.revision, op });
-      applied.push(op);
-    }
-    while (state.opLog.length > OP_LOG_LIMIT) state.opLog.shift();
+      for (const op of rebaseSequentialOps(ops, missed)) {
+        if (!opWithinBounds(op, state.content.length)) continue;
+        state.content = applyOp(state.content, op);
+        state.revision += 1;
+        state.opLog.push({ revision: state.revision, op });
+        applied.push(op);
+      }
+      while (state.opLog.length > OP_LOG_LIMIT) state.opLog.shift();
 
-    let savedAt: string | undefined;
-    if (applied.length > 0) {
-      savedAt = new Date().toISOString();
-      await (db as any)
-        .update(documents)
-        .set({ content: state.content, revision: state.revision, updatedAt: new Date(savedAt) })
-        .where(eq(documents.id, access.room.documentId));
-    }
+      if (clientMutationId) {
+        state.recentMutations.push({
+          id: clientMutationId,
+          revision: state.revision,
+          ops: applied,
+          content: state.content,
+        });
+        while (state.recentMutations.length > MUTATION_LOG_LIMIT) state.recentMutations.shift();
+      }
 
-    if (clientMutationId) {
-      state.recentMutations.push({
-        id: clientMutationId,
+      // Redis is the hot source of truth. Save it before publishing so a
+      // reconnecting collaborator can always initialize at this revision.
+      await saveRoomState(access.code, state);
+
+      // This is intentionally before durable persistence. It is also emitted
+      // for an empty accepted batch because the author's SSE echo is its ack.
+      await publish(access.code, {
+        type: "op",
         revision: state.revision,
         ops: applied,
-        content: state.content,
-        savedAt,
+        by: connectionId,
+        clientMutationId,
       });
-      while (state.recentMutations.length > MUTATION_LOG_LIMIT) state.recentMutations.shift();
-    }
 
-    await saveRoomState(access.code, state);
+      return {
+        result: {
+          revision: state.revision,
+          ops: applied,
+          content: state.content,
+          clientMutationId,
+          duplicate: false,
+        },
+        persistence: applied.length > 0
+          ? {
+              content: state.content,
+              revision: state.revision,
+              clientMutationId,
+            }
+          : undefined,
+      };
+    },
+  );
 
+  if ("stale" in lockedResult) return lockedResult;
+
+  // The lock has been released. Presence refresh and durable persistence are
+  // deliberately outside the serialized hot path.
+  await refreshRedisPresence(access.code, connectionId).catch(() => undefined);
+
+  const { result, persistence } = lockedResult;
+  if (!persistence) return result;
+
+  const savedAt = new Date().toISOString();
+  await (db as any)
+    .update(documents)
+    .set({
+      content: persistence.content,
+      revision: persistence.revision,
+      updatedAt: new Date(savedAt),
+    })
+    // A delayed revision can never overwrite a document snapshot persisted by
+    // a later operation. Equal revisions are safe retry writes for the same
+    // deterministic snapshot.
+    .where(
+      and(
+        eq(documents.id, access.room.documentId),
+        lte(documents.revision, persistence.revision),
+      ),
+    );
+
+  const confirmed = persistence.clientMutationId
+    ? await markMutationSaved(
+        access,
+        persistence.clientMutationId,
+        persistence.revision,
+        savedAt,
+      )
+    : { savedAt, newlyConfirmed: true };
+
+  // Only the request that confirms the marker emits saved. A racing duplicate
+  // gets the same marker in its HTTP acknowledgement without producing an
+  // out-of-order duplicate saved event.
+  if (confirmed.newlyConfirmed) {
     await publish(access.code, {
-      type: "op",
-      revision: state.revision,
-      ops: applied,
-      by: connectionId,
-      clientMutationId,
+      type: "saved",
+      revision: persistence.revision,
+      savedAt: confirmed.savedAt,
+      mode: "redis",
     });
+  }
 
-    if (applied.length > 0 && savedAt) {
-      await publish(access.code, {
-        type: "saved",
-        revision: state.revision,
-        savedAt,
-        mode: "redis",
-      });
-    }
-
-    await refreshRedisPresence(access.code, connectionId).catch(() => undefined);
-    return { revision: state.revision, ops: applied, content: state.content, clientMutationId, savedAt, duplicate: false };
-  });
+  return { ...result, savedAt: confirmed.savedAt };
 }
 
 export async function updateRedisMeta(
@@ -484,7 +584,12 @@ export async function buildRedisInitEvent(
     users: presences,
     members: members.map((member) => ({ ...member, online: onlineIds.has(member.user.id) })),
     cacheMode: "redis",
-    acceptedMutationIds: state.recentMutations.map((mutation) => mutation.id),
+    // Only durable confirmations may be discarded by a reconnecting client.
+    // Mutations without this marker must be retried with the same id so their
+    // snapshot persistence can recover after a failed POST response.
+    acceptedMutationIds: state.recentMutations
+      .filter((mutation) => Boolean(mutation.savedAt))
+      .map((mutation) => mutation.id),
   };
 }
 

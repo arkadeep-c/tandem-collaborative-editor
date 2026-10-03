@@ -6,6 +6,7 @@ import {
   flattenPendingOps,
   rebasePendingBatchesAgainstOps,
   replayPendingBatchesOnSnapshot,
+  visualReplayOps,
   type PendingOperationBatch,
 } from "@/lib/useCollaborativeDocument";
 import type { TextOp } from "@/lib/types";
@@ -72,6 +73,21 @@ describe("production collaboration reconciliation invariants", () => {
 
     expect(replay.content).toBe("Hi!");
     expect(replay.batches).toEqual(pending);
+  });
+
+  it("retries an SSE-acknowledged mutation without visually replaying it", () => {
+    const pending: PendingOperationBatch[] = [
+      {
+        id: "m_persist_retry",
+        ops: [{ type: "insert", offset: 2, text: "!" }],
+        serverAccepted: true,
+      },
+    ];
+    const replay = replayPendingBatchesOnSnapshot("Hi!", pending);
+
+    expect(replay.content).toBe("Hi!");
+    expect(replay.batches).toEqual(pending);
+    expect(visualReplayOps(replay.batches)).toEqual([]);
   });
 
   it("reconnects against a newer server revision without dropping rebased pending edits", () => {
