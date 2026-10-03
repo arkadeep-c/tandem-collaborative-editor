@@ -199,12 +199,34 @@ export async function ensureClientSession(): Promise<any> {
         console.error("[SESSION] bootstrap invalid response", { data });
         throw new Error("Invalid session response: missing user");
       }
-      console.log("[SESSION] SESSION_BOOTSTRAP_COMPLETE", { hasToken: !!data.sessionToken, fresh: data.fresh, id: data.user?.id?.slice(0, 8) });
-      handleSessionResponse(data);
-      console.log("[SESSION] SESSION_TOKEN_READY", { present: !!getStoredToken() });
-      lastSessionData = data;
-      sessionBootstrapDone = true;
-      return data;
+      console.log("[SESSION] SESSION_BOOTSTRAP_COMPLETE", {
+        fresh: data.fresh,
+        authMode: data.authMode,
+        id: data.user?.id?.slice(0, 8),
+      });
+
+      if (data.fresh && data.cookieVerificationRequired) {
+        const verificationRes = await fetch("/api/session", {
+          credentials: "include",
+          headers: makeSessionHeaders(),
+        });
+        const verification = await verificationRes.json().catch(() => null);
+        if (verificationRes.ok && verification?.user) {
+          const finalized = finalizeSessionBootstrap(data, verification);
+          console.log("[SESSION] COOKIE_VERIFICATION", {
+            authMode: verification.authMode,
+            fallback: !!getStoredToken(),
+          });
+          return finalized;
+        }
+      }
+
+      const finalized = finalizeSessionBootstrap(data);
+      console.log("[SESSION] SESSION_TOKEN_READY", {
+        present: !!getStoredToken(),
+        authMode: finalized?.authMode,
+      });
+      return finalized;
     } catch (e) {
       console.error("[SESSION] SESSION_BOOTSTRAP_ERROR", e);
       sessionBootstrapPromise = null;
@@ -300,17 +322,52 @@ export async function apiFetch(
   return response;
 }
 
-export function handleSessionResponse(data: any): void {
-  if (data?.user?.id) {
-    lastSessionData = { ...(lastSessionData ?? {}), ...data, user: data.user };
+function isSessionToken(value: unknown): value is string {
+  return typeof value === "string" && value.length > 10;
+}
+
+function makeSessionHeaders(token?: string | null): Headers {
+  const headers = new Headers({ Accept: "application/json" });
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return headers;
+}
+
+export function finalizeSessionBootstrap(
+  data: any,
+  verification?: any,
+): any {
+  const verified = verification ?? data;
+  if (verified?.authMode === "cookie" && verified?.user?.id) {
+    clearStoredToken();
+    lastSessionData = { ...verified, user: verified.user };
     sessionBootstrapDone = true;
+    return verified;
   }
-  if (data && typeof data.sessionToken === "string" && data.sessionToken.length > 10) {
-    if (process.env.NODE_ENV === "development") {
-      console.log("[AUTH] handleSessionResponse storing token", { len: data.sessionToken.length });
-    }
+
+  if (verified?.authMode === "bearer" && isSessionToken(verified.sessionToken)) {
+    storeToken(verified.sessionToken);
+    lastSessionData = { ...verified, user: verified.user };
+    sessionBootstrapDone = true;
+    return verified;
+  }
+
+  if (isSessionToken(data?.sessionToken)) {
     storeToken(data.sessionToken);
   }
+  lastSessionData = { ...(lastSessionData ?? {}), ...data, user: data.user };
+  sessionBootstrapDone = true;
+  return data;
+}
+
+export function handleSessionResponse(data: any): void {
+  if (!data?.user?.id) return;
+  if (data.authMode === "cookie") {
+    clearStoredToken();
+  } else if (data.authMode === "bearer" && isSessionToken(data.sessionToken)) {
+    storeToken(data.sessionToken);
+  }
+  lastSessionData = { ...(lastSessionData ?? {}), ...data, user: data.user };
+  sessionBootstrapDone = true;
 }
 
 export function getAuthDiagnostics() {
