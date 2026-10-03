@@ -15,7 +15,7 @@ import { withJsonErrors } from "@/lib/apiErrors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 type RouteContext = { params: Promise<{ code: string }> };
 
