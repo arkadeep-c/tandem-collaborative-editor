@@ -5,6 +5,7 @@ import {
   buildRedisInitEvent,
   joinRedisPresence,
   leaveRedisPresence,
+  redisConnectionBelongsTo,
   refreshRedisPresence,
   subscribeRedisRoom,
 } from "@/lib/collab/redisRealtime";
@@ -40,6 +41,11 @@ async function GETHandler(request: NextRequest, ctx: RouteContext) {
     name: access.session.user.name,
     color: access.session.user.color,
   };
+  const replaceConnectionId = request.nextUrl.searchParams.get("replace");
+  const validReplacement =
+    typeof replaceConnectionId === "string" && /^c_[a-f0-9]{18}$/.test(replaceConnectionId)
+      ? replaceConnectionId
+      : null;
   const connectionId = newConnectionId();
   const encoder = new TextEncoder();
 
@@ -77,6 +83,17 @@ async function GETHandler(request: NextRequest, ctx: RouteContext) {
         };
 
         try {
+          if (validReplacement && validReplacement !== connectionId) {
+            const ownsReplacement = await redisConnectionBelongsTo(
+              access.code,
+              validReplacement,
+              user.id,
+            ).catch(() => false);
+            if (ownsReplacement) {
+              await leaveRedisPresence(access.code, validReplacement).catch(() => undefined);
+            }
+          }
+
           await joinRedisPresence(access.code, connectionId, user);
           unsubscribe = await subscribeRedisRoom(access.code, send);
           send(await buildRedisInitEvent(access, connectionId, members));
@@ -149,6 +166,14 @@ async function GETHandler(request: NextRequest, ctx: RouteContext) {
         }
       };
 
+      if (
+        validReplacement &&
+        validReplacement !== connectionId &&
+        room.connectionBelongsTo(validReplacement, user.id)
+      ) {
+        room.leaveConnection(validReplacement);
+      }
+
       room.join(connectionId, user);
       unsubscribe = room.subscribe(connectionId, send);
       const activeUserIds = new Set([...room.users.values()].map((presence) => presence.user.id));
@@ -169,6 +194,7 @@ async function GETHandler(request: NextRequest, ctx: RouteContext) {
         users: [...room.users.values()],
         members: members.map((member) => ({ ...member, online: activeUserIds.has(member.user.id) })),
         cacheMode: store.mode,
+        acceptedMutationIds: room.recentMutationIds(),
       });
       if (closed) return;
 

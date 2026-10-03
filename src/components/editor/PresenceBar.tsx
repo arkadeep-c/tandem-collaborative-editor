@@ -26,7 +26,9 @@ interface PresenceBarProps {
 
 const MAX_VISIBLE = 6;
 
-export function distinctPresenceConnections(users: PresenceState[]): PresenceState[] {
+export function distinctPresenceConnections(
+  users: PresenceState[],
+): PresenceState[] {
   return Array.from(
     users.reduce((map, presence) => {
       map.set(presence.sessionId, presence);
@@ -52,7 +54,7 @@ export default function PresenceBar({
         {visible.map((presence) => {
           const isSelf =
             presence.sessionId === selfSessionId ||
-            (!selfSessionId && Boolean(selfUserId && presence.user.id === selfUserId));
+            Boolean(!selfSessionId && selfUserId && presence.user.id === selfUserId);
           const isRemoteTyping = !isSelf && presence.typing;
           return (
             <div

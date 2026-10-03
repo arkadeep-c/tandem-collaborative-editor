@@ -9,8 +9,8 @@ import { PRESENCE_COLORS } from "@/lib/validation";
 /**
  * Server-managed anonymous sessions.
  *
- * PRIMARY: HttpOnly signed session cookie (first-party SameSite=Lax by default; explicit None+Partitioned only for embedded previews)
- * FALLBACK: Signed bearer token (sessionStorage) for iframe contexts where cookies are blocked
+ * PRIMARY: HttpOnly signed session cookie (Secure + SameSite=Lax in production by default)
+ * FALLBACK: Signed bearer token for contexts where cookies are blocked
  *
  *  - The server creates the user (random UUID) AND the session token.
  *  - Cookie: `${token}.${HMAC(token)}` HttpOnly
@@ -369,7 +369,7 @@ function getCookieConfig(): CookieConfig {
     if (v === "none" || v === "lax" || v === "strict") {
       sameSite = v as SameSiteValue;
     } else {
-      sameSite = secure ? "none" : "lax";
+      sameSite = "lax";
     }
   } else {
     sameSite = "lax";

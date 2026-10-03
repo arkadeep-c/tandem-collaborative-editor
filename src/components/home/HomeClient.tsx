@@ -230,21 +230,25 @@ export default function HomeClient() {
 
       try {
         // Use singleton bootstrap — ensures only one GET /api/session, others await same promise
-        const data = (await ensureClientSession()) as {
-          user: ClientUser;
-          fresh?: boolean;
-          sessionToken?: string;
-          authMode?: "bootstrap" | "cookie" | "bearer";
-        } | null | undefined;
+        const data = (await ensureClientSession()) as { user: ClientUser; fresh?: boolean; sessionToken?: string; bearerFallback?: boolean } | null | undefined;
         if (!data || !data.user || !data.user.id) {
           console.error("[HOME] SESSION_BOOTSTRAP returned invalid data", { data });
           throw new Error("Could not establish a session.");
         }
         console.log("[HOME] SESSION_READY", { id: data.user?.id?.slice(0, 8), name: data.user?.name, fresh: data.fresh });
         setUser(data.user);
-        const usingBearer = data.authMode === "bearer";
-        console.log("[HOME] session auth mode", { authMode: data.authMode, bearerFallback: usingBearer });
-        setBearerFallback(usingBearer);
+        const diagAfter = getAuthDiagnostics();
+        const fallbackActive = Boolean(data.bearerFallback || getStoredToken());
+        if (fallbackActive) {
+          console.log("[HOME] bearer fallback active", {
+            memoryToken: diagAfter.memoryToken,
+            windowNameToken: diagAfter.windowNameToken,
+            sessionStorageToken: diagAfter.sessionStorageToken,
+          });
+        } else {
+          console.log("[HOME] cookie auth active");
+        }
+        setBearerFallback(fallbackActive);
 
         // Persistence check (optional) — should be same id now that bootstrap done
         try {
@@ -486,7 +490,7 @@ export default function HomeClient() {
           <div className="mx-auto max-w-7xl px-5 pt-6 sm:px-6 lg:px-8">
             <div className="premium-panel rounded-2xl border-cyan-300/20 px-4 py-3 text-sm text-cyan-100">
               <p className="font-medium">
-                Using secure bearer session fallback — your browser is blocking embedded cookies, but collaboration will still work in this preview.
+                Using secure bearer session fallback because cookie authentication is unavailable in this browser context. Collaboration remains enabled.
               </p>
             </div>
           </div>

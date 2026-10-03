@@ -122,7 +122,7 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
       language: found.document.language,
       locked: Boolean(found.room.locked),
       templateMode: normalizeRoomTemplateMode(found.room.templateMode),
-      activeUsers: activePresence ? new Set(activePresence.map((presence) => presence.user.id)).size : roomEngine.getActiveCount(code),
+      activeUsers: activePresence ? activePresence.length : roomEngine.getActiveCount(code),
     },
     members,
     role: grantedRole,

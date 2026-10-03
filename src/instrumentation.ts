@@ -70,6 +70,6 @@ export async function register() {
   const sameSiteEnv = process.env.SESSION_COOKIE_SAMESITE;
   const partitionedEnv = process.env.SESSION_COOKIE_PARTITIONED;
   console.log(
-    `[startup] config=${JSON.stringify(configSummary)} cookie SECURE=${secureEnv ?? (production ? "true (default prod)" : "false (default dev)")} SAMESITE=${sameSiteEnv ?? (production ? "none (default prod)" : "lax (default dev)")} PARTITIONED=${partitionedEnv ?? (production ? "true (default prod)" : "false (default dev)")}`,
+    `[startup] config=${JSON.stringify(configSummary)} cookie SECURE=${secureEnv ?? (production ? "true (default prod)" : "false (default dev)")} SAMESITE=${sameSiteEnv ?? "lax (default)"} PARTITIONED=${partitionedEnv ?? "false (default)"}`,
   );
 }

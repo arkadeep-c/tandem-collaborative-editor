@@ -41,6 +41,13 @@ interface LoggedOp {
   op: TextOp;
 }
 
+interface AppliedMutation {
+  id: string;
+  revision: number;
+  ops: TextOp[];
+  content: string;
+}
+
 export type Subscriber = (event: ServerEvent) => void;
 
 export interface RoomRecord {
@@ -59,6 +66,8 @@ class Room {
   revision = 0;
   readonly users = new Map<string, PresenceState>(); // connectionId → presence
   private readonly opLog: LoggedOp[] = [];
+  private readonly recentMutations = new Map<string, AppliedMutation>();
+  private readonly mutationOrder: string[] = [];
   private readonly subscribers = new Map<string, Set<Subscriber>>();
   private flushTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
@@ -209,8 +218,31 @@ class Room {
     connectionId: string,
     baseRevision: number,
     ops: TextOp[],
-  ): Promise<{ revision: number } | { stale: true }> {
+    clientMutationId?: string,
+  ): Promise<
+    | {
+        revision: number;
+        ops: TextOp[];
+        content: string;
+        clientMutationId?: string;
+        duplicate?: boolean;
+      }
+    | { stale: true }
+  > {
     return this.enqueue(async () => {
+      if (clientMutationId) {
+        const prior = this.recentMutations.get(clientMutationId);
+        if (prior) {
+          return {
+            revision: prior.revision,
+            ops: prior.ops,
+            content: prior.content,
+            clientMutationId,
+            duplicate: true,
+          };
+        }
+      }
+
       // A base ABOVE the tip is as invalid as one below the window.
       if (
         baseRevision > this.revision ||
@@ -259,6 +291,7 @@ class Room {
           revision: this.revision,
           ops: applied,
           by: connectionId,
+          clientMutationId,
         });
       }
       // Author echo over the ordered stream: the FSM "ack" that releases
@@ -268,9 +301,35 @@ class Room {
         revision: this.revision,
         ops: applied,
         by: connectionId,
+        clientMutationId,
       });
-      return { revision: this.revision };
+
+      if (clientMutationId) {
+        this.recentMutations.set(clientMutationId, {
+          id: clientMutationId,
+          revision: this.revision,
+          ops: applied,
+          content: this.content,
+        });
+        this.mutationOrder.push(clientMutationId);
+        while (this.mutationOrder.length > OP_LOG_LIMIT * 2) {
+          const stale = this.mutationOrder.shift();
+          if (stale) this.recentMutations.delete(stale);
+        }
+      }
+
+      return {
+        revision: this.revision,
+        ops: applied,
+        content: this.content,
+        clientMutationId,
+        duplicate: false,
+      };
     });
+  }
+
+  recentMutationIds(): string[] {
+    return [...this.recentMutations.keys()];
   }
 
   /* ---------------- metadata (authz enforced by the route) ---------------- */

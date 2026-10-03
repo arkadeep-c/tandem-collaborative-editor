@@ -10,6 +10,7 @@ import type { ClientUser, PresenceState, RoomMemberInfo, ServerEvent, TextOp } f
 import type { RoomAccess as Access } from "@/lib/roomAccess";
 
 const OP_LOG_LIMIT = 256;
+const MUTATION_LOG_LIMIT = 4096;
 const HOT_STATE_TTL_SECONDS = 60 * 60 * 6;
 const PRESENCE_TTL_SECONDS = 45;
 const LOCK_TTL_MS = 5_000;
@@ -21,10 +22,19 @@ interface LoggedOp {
   op: TextOp;
 }
 
+interface AppliedMutation {
+  id: string;
+  revision: number;
+  ops: TextOp[];
+  content: string;
+  savedAt?: string;
+}
+
 interface RedisRoomState {
   content: string;
   revision: number;
   opLog: LoggedOp[];
+  recentMutations: AppliedMutation[];
 }
 
 const prefix = "tandem";
@@ -77,7 +87,20 @@ async function loadRoomState(access: Extract<Access, { ok: true }>): Promise<Red
         Array.isArray(parsed.opLog) &&
         parsed.revision >= access.document.revision
       ) {
-        return parsed;
+        return {
+          content: parsed.content,
+          revision: parsed.revision,
+          opLog: parsed.opLog,
+          recentMutations: Array.isArray(parsed.recentMutations)
+            ? parsed.recentMutations.filter((item): item is AppliedMutation =>
+                item &&
+                typeof item.id === "string" &&
+                typeof item.revision === "number" &&
+                Array.isArray(item.ops) &&
+                typeof item.content === "string",
+              )
+            : [],
+        };
       }
     } catch {
       // replace corrupt cache from durable DB snapshot below
@@ -88,6 +111,7 @@ async function loadRoomState(access: Extract<Access, { ok: true }>): Promise<Red
     content: access.document.content,
     revision: access.document.revision,
     opLog: [],
+    recentMutations: [],
   };
   await saveRoomState(access.code, state);
   return state;
@@ -103,10 +127,30 @@ async function cleanupPresence(code: string): Promise<void> {
   const cutoff = Date.now() - PRESENCE_TTL_SECONDS * 1000;
   const stale = await redis!.zrangebyscore(roomPresenceIndexKey(code), 0, cutoff);
   if (stale.length > 0) {
+    const staleValues = await redis!.hmget(roomPresenceKey(code), ...stale);
     await redis!.multi()
       .hdel(roomPresenceKey(code), ...stale)
       .zrem(roomPresenceIndexKey(code), ...stale)
+      .del(...stale.map((connectionId) => connectionKey(connectionId)))
       .exec();
+
+    await Promise.all(
+      staleValues.map(async (raw, index) => {
+        if (!raw) return;
+        try {
+          const presence = JSON.parse(raw) as PresenceState;
+          if (presence.user?.id) {
+            await publish(code, {
+              type: "leave",
+              sessionId: stale[index]!,
+              userId: presence.user.id,
+            });
+          }
+        } catch {
+          // ignore corrupt stale presence records
+        }
+      }),
+    );
   }
 }
 
@@ -128,7 +172,7 @@ export async function getRedisPresence(code: string): Promise<PresenceState[]> {
 
 export async function getRedisActiveCount(code: string): Promise<number> {
   const users = await getRedisPresence(code);
-  return new Set(users.map((presence) => presence.user.id)).size;
+  return users.length;
 }
 
 export async function joinRedisPresence(
@@ -280,13 +324,39 @@ export async function applyRedisOperations(
   connectionId: string,
   baseRevision: number,
   ops: TextOp[],
-): Promise<{ revision: number } | { stale: true; revision: number; content: string }> {
+  clientMutationId?: string,
+): Promise<
+  | {
+      revision: number;
+      ops: TextOp[];
+      content: string;
+      clientMutationId?: string;
+      savedAt?: string;
+      duplicate?: boolean;
+    }
+  | { stale: true; revision: number; content: string }
+> {
   if (!(await redisConnectionBelongsTo(access.code, connectionId, access.session.user.id))) {
     throw new Error("UNAUTHORIZED_CONNECTION");
   }
 
   return withRoomLock(access.code, async () => {
     const state = await loadRoomState(access);
+    if (clientMutationId) {
+      const prior = state.recentMutations.find((item) => item.id === clientMutationId);
+      if (prior) {
+        await refreshRedisPresence(access.code, connectionId).catch(() => undefined);
+        return {
+          revision: prior.revision,
+          ops: prior.ops,
+          content: prior.content,
+          clientMutationId,
+          savedAt: prior.savedAt,
+          duplicate: true,
+        };
+      }
+    }
+
     if (baseRevision > state.revision || baseRevision < state.revision - state.opLog.length) {
       return { stale: true as const, revision: state.revision, content: state.content };
     }
@@ -304,26 +374,47 @@ export async function applyRedisOperations(
     }
     while (state.opLog.length > OP_LOG_LIMIT) state.opLog.shift();
 
-    await saveRoomState(access.code, state);
-
+    let savedAt: string | undefined;
     if (applied.length > 0) {
+      savedAt = new Date().toISOString();
       await (db as any)
         .update(documents)
-        .set({ content: state.content, revision: state.revision, updatedAt: new Date() })
+        .set({ content: state.content, revision: state.revision, updatedAt: new Date(savedAt) })
         .where(eq(documents.id, access.room.documentId));
-      await publish(access.code, { type: "op", revision: state.revision, ops: applied, by: connectionId });
+    }
+
+    if (clientMutationId) {
+      state.recentMutations.push({
+        id: clientMutationId,
+        revision: state.revision,
+        ops: applied,
+        content: state.content,
+        savedAt,
+      });
+      while (state.recentMutations.length > MUTATION_LOG_LIMIT) state.recentMutations.shift();
+    }
+
+    await saveRoomState(access.code, state);
+
+    await publish(access.code, {
+      type: "op",
+      revision: state.revision,
+      ops: applied,
+      by: connectionId,
+      clientMutationId,
+    });
+
+    if (applied.length > 0 && savedAt) {
       await publish(access.code, {
         type: "saved",
         revision: state.revision,
-        savedAt: new Date().toISOString(),
+        savedAt,
         mode: "redis",
       });
-    } else {
-      await publish(access.code, { type: "op", revision: state.revision, ops: applied, by: connectionId });
     }
 
     await refreshRedisPresence(access.code, connectionId).catch(() => undefined);
-    return { revision: state.revision };
+    return { revision: state.revision, ops: applied, content: state.content, clientMutationId, savedAt, duplicate: false };
   });
 }
 
@@ -393,6 +484,7 @@ export async function buildRedisInitEvent(
     users: presences,
     members: members.map((member) => ({ ...member, online: onlineIds.has(member.user.id) })),
     cacheMode: "redis",
+    acceptedMutationIds: state.recentMutations.map((mutation) => mutation.id),
   };
 }
 

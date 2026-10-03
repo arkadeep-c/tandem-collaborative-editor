@@ -27,6 +27,12 @@ export function transformOffset(offset: number, against: TextOp): number {
 
 export function transformOp(op: TextOp, against: TextOp): TextOp | null {
   if (op.type === "insert") {
+    if (against.type === "delete") {
+      const end = against.offset + against.length;
+      if (op.offset > against.offset && op.offset < end) {
+        return null;
+      }
+    }
     return { ...op, offset: transformOffset(op.offset, against) };
   }
   const start = transformOffset(op.offset, against);

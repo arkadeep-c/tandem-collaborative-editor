@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyOp, rebaseSequentialOps } from "@/lib/ot";
+import { opWithinBounds } from "@/lib/validation";
 import type {
   ClientUser,
   CursorPosition,
+  OperationAck,
   OperationBatch,
   PresenceState,
   RoomMemberInfo,
@@ -61,44 +63,91 @@ type SessionResponse = {
   sessionToken?: string;
 };
 
+export interface PendingOperationBatch {
+  id: string;
+  ops: TextOp[];
+}
+
+function createClientMutationId(): string {
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().replace(/[^a-zA-Z0-9_-]/g, "")
+      : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  return `m_${random}`.slice(0, 98);
+}
+
+export function flattenPendingOps(
+  batches: readonly PendingOperationBatch[],
+): TextOp[] {
+  return batches.flatMap((batch) => batch.ops);
+}
+
+export function replayPendingBatchesOnSnapshot(
+  content: string,
+  batches: readonly PendingOperationBatch[],
+): { content: string; batches: PendingOperationBatch[] } {
+  let nextContent = content;
+  const replayed: PendingOperationBatch[] = [];
+
+  for (const batch of batches) {
+    const ops: TextOp[] = [];
+    for (const op of batch.ops) {
+      if (!opWithinBounds(op, nextContent.length)) continue;
+      nextContent = applyOp(nextContent, op);
+      ops.push(op);
+    }
+    if (ops.length > 0) replayed.push({ ...batch, ops });
+  }
+
+  return { content: nextContent, batches: replayed };
+}
+
+export function rebasePendingBatchesAgainstOps(
+  batches: readonly PendingOperationBatch[],
+  against: readonly TextOp[],
+): PendingOperationBatch[] {
+  return batches
+    .map((batch) => ({
+      ...batch,
+      ops: rebaseSequentialOps(batch.ops, [...against]),
+    }))
+    .filter((batch) => batch.ops.length > 0);
+}
+
+export function dropAcceptedPendingBatches(
+  batches: readonly PendingOperationBatch[],
+  acceptedMutationIds: ReadonlySet<string>,
+): PendingOperationBatch[] {
+  if (acceptedMutationIds.size === 0) return [...batches];
+  return batches.filter((batch) => !acceptedMutationIds.has(batch.id));
+}
+
 function roleForSelf(members: RoomMemberInfo[], userId?: string): RoomRole | null {
   if (!userId) return null;
   return members.find((member) => member.user.id === userId)?.role ?? null;
 }
 
-function sameOp(a: TextOp, b: TextOp): boolean {
-  if (a.type !== b.type || a.offset !== b.offset) return false;
-  return a.type === "insert" && b.type === "insert"
-    ? a.text === b.text
-    : a.type === "delete" && b.type === "delete"
-      ? a.length === b.length
-      : false;
+export function replayLocalOpsOnSnapshot(
+  content: string,
+  ops: TextOp[],
+): { content: string; ops: TextOp[] } {
+  const replay = replayPendingBatchesOnSnapshot(content, [
+    { id: "legacy", ops },
+  ]);
+  return {
+    content: replay.content,
+    ops: flattenPendingOps(replay.batches),
+  };
 }
 
-function dropMatchingPrefix(ops: TextOp[], acknowledged: TextOp[]): TextOp[] {
-  let index = 0;
-  while (index < acknowledged.length && index < ops.length && sameOp(ops[index]!, acknowledged[index]!)) {
-    index += 1;
-  }
-  return index > 0 ? ops.slice(index) : ops;
-}
-
-function replayLocalOpsOnSnapshot(content: string, ops: TextOp[]): {
-  content: string;
-  ops: TextOp[];
-} {
-  let nextContent = content;
-  const replayed: TextOp[] = [];
-  for (const op of ops) {
-    const valid =
-      op.type === "insert"
-        ? op.offset >= 0 && op.offset <= nextContent.length
-        : op.offset >= 0 && op.length >= 0 && op.offset + op.length <= nextContent.length;
-    if (!valid) continue;
-    nextContent = applyOp(nextContent, op);
-    replayed.push(op);
-  }
-  return { content: nextContent, ops: replayed };
+export function classifyServerOpRevision(
+  currentRevision: number,
+  eventRevision: number,
+  opCount: number,
+): "ready" | "stale" | "gap" {
+  if (eventRevision <= currentRevision) return "stale";
+  const eventBaseRevision = eventRevision - opCount;
+  return eventBaseRevision === currentRevision ? "ready" : "gap";
 }
 
 export function useCollaborativeDocument(roomCode: string) {
@@ -123,8 +172,8 @@ export function useCollaborativeDocument(roomCode: string) {
   const connectionIdRef = useRef("");
   const selfUserIdRef = useRef<string | null>(null);
   const revisionRef = useRef(0);
-  const outstandingRef = useRef<TextOp[] | null>(null);
-  const bufferRef = useRef<TextOp[]>([]);
+  const outstandingRef = useRef<PendingOperationBatch | null>(null);
+  const bufferRef = useRef<PendingOperationBatch[]>([]);
   const bridgeRef = useRef<EditorBridge | null>(null);
   const snapshotRef = useRef<{ content: string } | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
@@ -138,6 +187,29 @@ export function useCollaborativeDocument(roomCode: string) {
     [],
   );
 
+  const hasPending = useCallback(
+    () => Boolean(outstandingRef.current || bufferRef.current.length > 0),
+    [],
+  );
+
+  const pendingBatches = useCallback((): PendingOperationBatch[] => {
+    return [
+      ...(outstandingRef.current ? [outstandingRef.current] : []),
+      ...bufferRef.current,
+    ];
+  }, []);
+
+  const updatePendingState = useCallback(
+    (patch: Partial<CollabState> = {}) => {
+      setState((prev) => ({
+        ...prev,
+        ...patch,
+        unsent: hasPending(),
+      }));
+    },
+    [hasPending],
+  );
+
   const pump = useCallback(async () => {
     if (outstandingRef.current || bufferRef.current.length === 0) return;
     const hasEventSource = sourceRef.current && sourceRef.current.readyState === EventSource.OPEN;
@@ -147,14 +219,17 @@ export function useCollaborativeDocument(roomCode: string) {
     }
     if (!connectionIdRef.current) return;
 
+    const pending = bufferRef.current.shift();
+    if (!pending) return;
+
     const batch: OperationBatch = {
       connectionId: connectionIdRef.current,
+      clientMutationId: pending.id,
       baseRevision: revisionRef.current,
-      ops: bufferRef.current,
+      ops: pending.ops,
     };
-    bufferRef.current = [];
-    outstandingRef.current = batch.ops;
-    patchState({ unsent: true });
+    outstandingRef.current = pending;
+    updatePendingState();
 
     try {
       const res = await apiFetch(
@@ -171,57 +246,91 @@ export function useCollaborativeDocument(roomCode: string) {
           revision: number;
           content: string;
         };
-        const pending = [
-          ...(outstandingRef.current ?? []),
-          ...bufferRef.current,
-        ];
-        const replayed = replayLocalOpsOnSnapshot(stale.content, pending);
+        const replay = replayPendingBatchesOnSnapshot(
+          stale.content,
+          pendingBatches(),
+        );
         outstandingRef.current = null;
-        bufferRef.current = replayed.ops;
+        bufferRef.current = replay.batches;
         revisionRef.current = stale.revision;
-        snapshotRef.current = { content: replayed.content };
-        bridgeRef.current?.reset(replayed.content);
-        patchState({
+        snapshotRef.current = { content: stale.content };
+        bridgeRef.current?.reset(stale.content);
+        const replayOps = flattenPendingOps(replay.batches);
+        if (replayOps.length > 0) bridgeRef.current?.applyRemote(replayOps);
+        updatePendingState({
           revision: stale.revision,
           syncedRevision: stale.revision,
-          unsent: replayed.ops.length > 0,
         });
-        if (replayed.ops.length > 0) {
-          sourceRef.current?.close();
-          sourceRef.current = null;
-          fetchControllerRef.current?.abort();
-          fetchControllerRef.current = null;
-          patchState({ connection: "reconnecting" });
-          reconnectTimerRef.current = setTimeout(
-            () => void openStreamRef.current(),
-            RECONNECT_DELAY_MS,
-          );
-        }
+        if (replayOps.length > 0) queueMicrotask(() => void pumpRef.current());
         return;
       }
       if (!res.ok) throw new Error(`operations failed: ${res.status}`);
-    } catch {
-      const pending = [
-        ...(outstandingRef.current ?? []),
-        ...bufferRef.current,
-      ];
+
+      const ack = (await res.json().catch(() => null)) as OperationAck | null;
+      const completed = outstandingRef.current;
+      const ackOps = ack?.ops ?? completed?.ops ?? [];
+      const ackRevision = ack?.revision ?? revisionRef.current;
+      const hasUnseenServerOps = ackRevision > revisionRef.current + ackOps.length;
+      const needsAuthoritativeContentReset = Boolean(
+        ack?.content !== undefined && (hasUnseenServerOps || ack.duplicate),
+      );
+
       outstandingRef.current = null;
-      bufferRef.current = pending;
-      patchState({ unsent: pending.length > 0 });
+
+      if (completed && needsAuthoritativeContentReset && ack?.content !== undefined) {
+        const replay = replayPendingBatchesOnSnapshot(ack.content, bufferRef.current);
+        bufferRef.current = replay.batches;
+        snapshotRef.current = { content: ack.content };
+        bridgeRef.current?.reset(ack.content);
+        const replayOps = flattenPendingOps(replay.batches);
+        if (replayOps.length > 0) bridgeRef.current?.applyRemote(replayOps);
+      } else if (completed && snapshotRef.current) {
+        for (const op of ackOps) {
+          if (opWithinBounds(op, snapshotRef.current.content.length)) {
+            snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
+          }
+        }
+      }
+
+      const nextRevision = hasUnseenServerOps
+        ? ackRevision
+        : Math.max(revisionRef.current, ackRevision);
+      revisionRef.current = nextRevision;
+      setState((prev) => ({
+        ...prev,
+        revision: nextRevision,
+        syncedRevision: ack?.savedAt
+          ? Math.max(prev.syncedRevision, ack.revision)
+          : prev.syncedRevision,
+        savedAt: ack?.savedAt ?? prev.savedAt,
+        cacheMode: ack?.mode ?? prev.cacheMode,
+        unsent: hasPending(),
+      }));
+      void pumpRef.current();
+    } catch {
+      if (outstandingRef.current) {
+        bufferRef.current = [outstandingRef.current, ...bufferRef.current];
+      }
+      outstandingRef.current = null;
+      updatePendingState();
       sourceRef.current?.close();
       sourceRef.current = null;
       fetchControllerRef.current?.abort();
       fetchControllerRef.current = null;
       patchState({ connection: "reconnecting" });
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = setTimeout(
         () => void openStreamRef.current(),
         RECONNECT_DELAY_MS,
       );
     }
-  }, [roomCode, patchState]);
+  }, [roomCode, patchState, pendingBatches, updatePendingState, hasPending]);
 
   const pumpRef = useRef(pump);
   useEffect(() => {
+    // A stable pump ref lets async stream handlers call the latest sender without
+    // re-subscribing the SSE connection on every queue-state change.
+    // eslint-disable-next-line react-hooks/immutability
     pumpRef.current = pump;
   }, [pump]);
 
@@ -237,23 +346,29 @@ export function useCollaborativeDocument(roomCode: string) {
           failuresRef.current = 0;
           connectionIdRef.current = event.sessionId;
           selfUserIdRef.current = event.you.user.id;
-          const pending = [
-            ...(outstandingRef.current ?? []),
-            ...bufferRef.current,
-          ];
-          const previousSnapshot = snapshotRef.current?.content ?? null;
-          const serverAlreadyIncludesPending =
-            previousSnapshot !== null &&
-            pending.length > 0 &&
-            replayLocalOpsOnSnapshot(previousSnapshot, pending).content === event.content;
-          const replayed = serverAlreadyIncludesPending
-            ? { content: event.content, ops: [] as TextOp[] }
-            : replayLocalOpsOnSnapshot(event.content, pending);
+          const acceptedMutationIds = new Set(event.acceptedMutationIds ?? []);
+          const pending = dropAcceptedPendingBatches(
+            pendingBatches(),
+            acceptedMutationIds,
+          );
+          const previousSnapshot = snapshotRef.current?.content ?? "";
+          const optimistic = replayPendingBatchesOnSnapshot(previousSnapshot, pending);
+          const pendingOps = flattenPendingOps(pending);
+          const serverAlreadyHasPending =
+            pendingOps.length > 0 &&
+            flattenPendingOps(optimistic.batches).length === pendingOps.length &&
+            optimistic.content === event.content;
+          const replay = serverAlreadyHasPending
+            ? { content: event.content, batches: [] as PendingOperationBatch[] }
+            : replayPendingBatchesOnSnapshot(event.content, pending);
+          const replayOps = flattenPendingOps(replay.batches);
+
           revisionRef.current = event.revision;
           outstandingRef.current = null;
-          bufferRef.current = replayed.ops;
-          snapshotRef.current = { content: replayed.content };
-          bridgeRef.current?.reset(replayed.content);
+          bufferRef.current = replay.batches;
+          snapshotRef.current = { content: event.content };
+          bridgeRef.current?.reset(event.content);
+          if (replayOps.length > 0) bridgeRef.current?.applyRemote(replayOps);
           setState((prev) => ({
             ...prev,
             connection: "connected",
@@ -269,46 +384,82 @@ export function useCollaborativeDocument(roomCode: string) {
             revision: event.revision,
             syncedRevision: event.revision,
             cacheMode: event.cacheMode,
-            unsent: replayed.ops.length > 0,
+            unsent: hasPending(),
           }));
+          if (replayOps.length > 0) queueMicrotask(() => void pumpRef.current());
           break;
         }
         case "op": {
-          if (snapshotRef.current && event.ops.length > 0) {
-            for (const op of event.ops) {
-              snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
-            }
+          const revisionState = classifyServerOpRevision(
+            revisionRef.current,
+            event.revision,
+            event.ops.length,
+          );
+          if (revisionState === "stale") break;
+          if (revisionState === "gap") {
+            sourceRef.current?.close();
+            sourceRef.current = null;
+            fetchControllerRef.current?.abort();
+            fetchControllerRef.current = null;
+            scheduleReconnect();
+            break;
           }
+
           if (event.by === connectionIdRef.current) {
-            revisionRef.current = event.revision;
-            if (outstandingRef.current) {
-              outstandingRef.current = null;
-            } else {
-              bufferRef.current = dropMatchingPrefix(bufferRef.current, event.ops);
+            const outstanding = outstandingRef.current;
+            const matchesOutstanding = Boolean(
+              outstanding &&
+                (!event.clientMutationId || outstanding.id === event.clientMutationId),
+            );
+
+            if (matchesOutstanding && snapshotRef.current && event.ops.length > 0) {
+              for (const op of event.ops) {
+                if (opWithinBounds(op, snapshotRef.current.content.length)) {
+                  snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
+                }
+              }
             }
+
+            if (matchesOutstanding) {
+              outstandingRef.current = null;
+            } else if (event.clientMutationId) {
+              bufferRef.current = bufferRef.current.filter(
+                (batch) => batch.id !== event.clientMutationId,
+              );
+            }
+
+            revisionRef.current = event.revision;
             setState((prev) => ({
               ...prev,
               revision: event.revision,
-              unsent: bufferRef.current.length > 0,
+              unsent: hasPending(),
             }));
             void pumpRef.current();
             break;
           }
-          const preceding = [
-            ...(outstandingRef.current ?? []),
-            ...bufferRef.current,
-          ];
+
+          if (snapshotRef.current && event.ops.length > 0) {
+            for (const op of event.ops) {
+              if (opWithinBounds(op, snapshotRef.current.content.length)) {
+                snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
+              }
+            }
+          }
+
+          const preceding = flattenPendingOps(pendingBatches());
           const visual = rebaseSequentialOps(event.ops, preceding);
           if (outstandingRef.current) {
-            outstandingRef.current = rebaseSequentialOps(
-              outstandingRef.current,
-              event.ops,
-            );
+            outstandingRef.current =
+              rebasePendingBatchesAgainstOps([outstandingRef.current], event.ops)[0] ?? null;
           }
-          bufferRef.current = rebaseSequentialOps(bufferRef.current, event.ops);
+          bufferRef.current = rebasePendingBatchesAgainstOps(bufferRef.current, event.ops);
           if (visual.length > 0) bridgeRef.current?.applyRemote(visual);
           revisionRef.current = event.revision;
-          setState((prev) => ({ ...prev, revision: event.revision }));
+          setState((prev) => ({
+            ...prev,
+            revision: event.revision,
+            unsent: hasPending(),
+          }));
           break;
         }
         case "presence": {
@@ -442,6 +593,14 @@ export function useCollaborativeDocument(roomCode: string) {
       }
     };
 
+    const streamUrl = () => {
+      const params = new URLSearchParams();
+      const replace = connectionIdRef.current;
+      if (/^c_[a-f0-9]{18}$/.test(replace)) params.set("replace", replace);
+      const query = params.toString();
+      return `/api/rooms/${encodeURIComponent(roomCode)}/stream${query ? `?${query}` : ""}`;
+    };
+
     const parseSseChunk = (chunk: string, buffer: { text: string }) => {
       buffer.text += chunk;
       const events: { event: string; data: string }[] = [];
@@ -473,7 +632,7 @@ export function useCollaborativeDocument(roomCode: string) {
         fetchControllerRef.current = controller;
 
         const res = await apiFetch(
-          `/api/rooms/${encodeURIComponent(roomCode)}/stream`,
+          streamUrl(),
           {
             method: "GET",
             headers: { Accept: "text/event-stream" },
@@ -506,6 +665,11 @@ export function useCollaborativeDocument(roomCode: string) {
             }
           }
         }
+
+        if (!disposed && !controller.signal.aborted) {
+          fetchControllerRef.current = null;
+          scheduleReconnect();
+        }
       } catch (err) {
         if (disposed) return;
         if ((err as any)?.name === "AbortError") return;
@@ -517,7 +681,7 @@ export function useCollaborativeDocument(roomCode: string) {
     const openEventSource = async () => {
       if (disposed) return;
       const source = new EventSource(
-        `/api/rooms/${encodeURIComponent(roomCode)}/stream`,
+        streamUrl(),
         { withCredentials: true } as EventSourceInit,
       );
       sourceRef.current = source;
@@ -590,6 +754,7 @@ export function useCollaborativeDocument(roomCode: string) {
         return;
       }
       patchState({ connection: "reconnecting" });
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = setTimeout(
         () => void openStreamRef.current(),
         RECONNECT_DELAY_MS,
@@ -631,19 +796,21 @@ export function useCollaborativeDocument(roomCode: string) {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (presenceTimerRef.current) clearInterval(presenceTimerRef.current);
     };
-  }, [roomCode, patchState]);
+  }, [roomCode, patchState, pendingBatches, hasPending]);
 
   const setBridge = useCallback((bridge: EditorBridge | null) => {
     bridgeRef.current = bridge;
     if (bridge && snapshotRef.current) {
       bridge.reset(snapshotRef.current.content);
+      const replayOps = flattenPendingOps(pendingBatches());
+      if (replayOps.length > 0) bridge.applyRemote(replayOps);
     }
-  }, []);
+  }, [pendingBatches]);
 
   const submitLocalOps = useCallback(
     (ops: TextOp[]) => {
       if (ops.length === 0) return;
-      bufferRef.current.push(...ops);
+      bufferRef.current.push({ id: createClientMutationId(), ops });
       patchState({ unsent: true });
       void pumpRef.current();
     },

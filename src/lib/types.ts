@@ -19,6 +19,8 @@ export interface OperationBatch {
   /** Server-issued connection id (from the init snapshot). Verified
    *  server-side: the connection must exist and belong to the caller. */
   connectionId: string;
+  /** Stable client-generated id for idempotent retry of this local batch. */
+  clientMutationId?: string;
   /** Document revision immediately before the first op in `ops`. */
   baseRevision: number;
   /** Ordered sequential edit script; each op is based on prior ops in this array. */
@@ -105,12 +107,14 @@ export type ServerEvent =
       users: PresenceState[];
       members: RoomMemberInfo[];
       cacheMode: "redis" | "memory";
+      acceptedMutationIds?: string[];
     }
   | {
       type: "op";
       revision: number;
       ops: TextOp[];
       by: string; // connection id of the author
+      clientMutationId?: string;
     }
   | { type: "presence"; user: PresenceState }
   | { type: "leave"; sessionId: string; userId: string }
@@ -131,6 +135,12 @@ export type ServerEvent =
 export interface OperationAck {
   ok: true;
   revision: number;
+  clientMutationId?: string;
+  ops?: TextOp[];
+  content?: string;
+  savedAt?: string;
+  mode?: "redis" | "memory";
+  duplicate?: boolean;
 }
 
 export interface OperationStale {
