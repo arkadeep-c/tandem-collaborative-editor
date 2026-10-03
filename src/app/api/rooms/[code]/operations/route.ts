@@ -33,6 +33,7 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
 
   const body = (await request.json().catch(() => null)) as {
     connectionId?: unknown;
+    clientMutationId?: unknown;
     baseRevision?: unknown;
     ops?: unknown;
   } | null;
@@ -41,6 +42,9 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
     !body ||
     typeof body.connectionId !== "string" ||
     !/^c_[a-f0-9]{18}$/.test(body.connectionId) ||
+    (body.clientMutationId !== undefined &&
+      (typeof body.clientMutationId !== "string" ||
+        !/^m_[a-zA-Z0-9_-]{12,96}$/.test(body.clientMutationId))) ||
     !Number.isInteger(body.baseRevision) ||
     (body.baseRevision as number) < 0
   ) {
@@ -50,6 +54,9 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
   if (!(await operationsLimiter.hitAsync(body.connectionId))) {
     return NextResponse.json({ error: "Too many edits." }, { status: 429 });
   }
+
+  const clientMutationId =
+    typeof body.clientMutationId === "string" ? body.clientMutationId : undefined;
 
   const validated = validateOps(body.ops);
   if (!validated.ok) {
@@ -63,6 +70,7 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
         body.connectionId,
         body.baseRevision as number,
         validated.ops,
+        clientMutationId,
       );
       if ("stale" in result) {
         const payload: OperationStale = {
@@ -73,7 +81,16 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
         };
         return NextResponse.json(payload, { status: 409 });
       }
-      const ack: OperationAck = { ok: true, revision: result.revision };
+      const ack: OperationAck = {
+        ok: true,
+        revision: result.revision,
+        clientMutationId: result.clientMutationId,
+        ops: result.ops,
+        content: result.content,
+        savedAt: result.savedAt,
+        mode: "redis",
+        duplicate: result.duplicate,
+      };
       return NextResponse.json(ack);
     } catch (err) {
       if (err instanceof Error && err.message === "UNAUTHORIZED_CONNECTION") {
@@ -96,6 +113,7 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
     body.connectionId,
     body.baseRevision as number,
     validated.ops,
+    clientMutationId,
   );
 
   if ("stale" in result) {
@@ -108,7 +126,15 @@ async function POSTHandler(request: NextRequest, ctx: RouteContext) {
     return NextResponse.json(payload, { status: 409 });
   }
 
-  const ack: OperationAck = { ok: true, revision: result.revision };
+  const ack: OperationAck = {
+    ok: true,
+    revision: result.revision,
+    clientMutationId: result.clientMutationId,
+    ops: result.ops,
+    content: result.content,
+    mode: "memory",
+    duplicate: result.duplicate,
+  };
   return NextResponse.json(ack);
 }
 

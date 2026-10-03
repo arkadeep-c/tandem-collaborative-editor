@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyOp, rebaseSequentialOps } from "@/lib/ot";
+import { opWithinBounds } from "@/lib/validation";
 import type {
   ClientUser,
   CursorPosition,
+  OperationAck,
   OperationBatch,
   PresenceState,
   RoomMemberInfo,
@@ -61,9 +63,109 @@ type SessionResponse = {
   sessionToken?: string;
 };
 
+export interface PendingOperationBatch {
+  id: string;
+  ops: TextOp[];
+  /** The live SSE stream already applied this batch to the hot snapshot. */
+  serverAccepted?: boolean;
+}
+
+function createClientMutationId(): string {
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().replace(/[^a-zA-Z0-9_-]/g, "")
+      : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  return `m_${random}`.slice(0, 98);
+}
+
+export function flattenPendingOps(
+  batches: readonly PendingOperationBatch[],
+): TextOp[] {
+  return batches.flatMap((batch) => batch.ops);
+}
+
+export function replayPendingBatchesOnSnapshot(
+  content: string,
+  batches: readonly PendingOperationBatch[],
+): { content: string; batches: PendingOperationBatch[] } {
+  let nextContent = content;
+  const replayed: PendingOperationBatch[] = [];
+
+  for (const batch of batches) {
+    // A failed POST can be retried after its SSE echo has already applied the
+    // operation to this server snapshot. Keep that id in the send queue, but
+    // never visually replay its text a second time.
+    if (batch.serverAccepted) {
+      replayed.push(batch);
+      continue;
+    }
+
+    const ops: TextOp[] = [];
+    for (const op of batch.ops) {
+      if (!opWithinBounds(op, nextContent.length)) continue;
+      nextContent = applyOp(nextContent, op);
+      ops.push(op);
+    }
+    if (ops.length > 0) replayed.push({ ...batch, ops });
+  }
+
+  return { content: nextContent, batches: replayed };
+}
+
+export function visualReplayOps(
+  batches: readonly PendingOperationBatch[],
+): TextOp[] {
+  return flattenPendingOps(batches.filter((batch) => !batch.serverAccepted));
+}
+
+export function rebasePendingBatchesAgainstOps(
+  batches: readonly PendingOperationBatch[],
+  against: readonly TextOp[],
+): PendingOperationBatch[] {
+  return batches
+    .map((batch) => batch.serverAccepted
+      ? batch
+      : {
+          ...batch,
+          ops: rebaseSequentialOps(batch.ops, [...against]),
+        })
+    .filter((batch) => batch.ops.length > 0);
+}
+
+export function dropAcceptedPendingBatches(
+  batches: readonly PendingOperationBatch[],
+  acceptedMutationIds: ReadonlySet<string>,
+): PendingOperationBatch[] {
+  if (acceptedMutationIds.size === 0) return [...batches];
+  return batches.filter((batch) => !acceptedMutationIds.has(batch.id));
+}
+
 function roleForSelf(members: RoomMemberInfo[], userId?: string): RoomRole | null {
   if (!userId) return null;
   return members.find((member) => member.user.id === userId)?.role ?? null;
+}
+
+export function replayLocalOpsOnSnapshot(
+  content: string,
+  ops: TextOp[],
+): { content: string; ops: TextOp[] } {
+  const replay = replayPendingBatchesOnSnapshot(content, [
+    { id: "legacy", ops },
+  ]);
+  return {
+    content: replay.content,
+    ops: flattenPendingOps(replay.batches),
+  };
+}
+
+export function classifyServerOpRevision(
+  currentRevision: number,
+  eventRevision: number,
+  opCount: number,
+): "ready" | "stale" | "gap" {
+  if (eventRevision <= currentRevision) return "stale";
+  const eventBaseRevision = eventRevision - opCount;
+  return eventBaseRevision === currentRevision ? "ready" : "gap";
 }
 
 export function useCollaborativeDocument(roomCode: string) {
@@ -88,8 +190,9 @@ export function useCollaborativeDocument(roomCode: string) {
   const connectionIdRef = useRef("");
   const selfUserIdRef = useRef<string | null>(null);
   const revisionRef = useRef(0);
-  const outstandingRef = useRef<TextOp[] | null>(null);
-  const bufferRef = useRef<TextOp[]>([]);
+  const outstandingRef = useRef<PendingOperationBatch | null>(null);
+  const bufferRef = useRef<PendingOperationBatch[]>([]);
+  const sseAcknowledgedMutationIdsRef = useRef(new Set<string>());
   const bridgeRef = useRef<EditorBridge | null>(null);
   const snapshotRef = useRef<{ content: string } | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
@@ -103,6 +206,29 @@ export function useCollaborativeDocument(roomCode: string) {
     [],
   );
 
+  const hasPending = useCallback(
+    () => Boolean(outstandingRef.current || bufferRef.current.length > 0),
+    [],
+  );
+
+  const pendingBatches = useCallback((): PendingOperationBatch[] => {
+    return [
+      ...(outstandingRef.current ? [outstandingRef.current] : []),
+      ...bufferRef.current,
+    ];
+  }, []);
+
+  const updatePendingState = useCallback(
+    (patch: Partial<CollabState> = {}) => {
+      setState((prev) => ({
+        ...prev,
+        ...patch,
+        unsent: hasPending(),
+      }));
+    },
+    [hasPending],
+  );
+
   const pump = useCallback(async () => {
     if (outstandingRef.current || bufferRef.current.length === 0) return;
     const hasEventSource = sourceRef.current && sourceRef.current.readyState === EventSource.OPEN;
@@ -112,14 +238,17 @@ export function useCollaborativeDocument(roomCode: string) {
     }
     if (!connectionIdRef.current) return;
 
+    const pending = bufferRef.current.shift();
+    if (!pending) return;
+
     const batch: OperationBatch = {
       connectionId: connectionIdRef.current,
+      clientMutationId: pending.id,
       baseRevision: revisionRef.current,
-      ops: bufferRef.current,
+      ops: pending.ops,
     };
-    bufferRef.current = [];
-    outstandingRef.current = batch.ops;
-    patchState({ unsent: true });
+    outstandingRef.current = pending;
+    updatePendingState();
 
     try {
       const res = await apiFetch(
@@ -132,37 +261,144 @@ export function useCollaborativeDocument(roomCode: string) {
       );
 
       if (res.status === 409) {
+        // The op SSE echo can release this batch and start a newer one before
+        // this POST response arrives. A stale response must never reset that
+        // newer local state.
+        if (outstandingRef.current?.id !== pending.id) return;
+
         const stale = (await res.json()) as {
           revision: number;
           content: string;
         };
+        const replay = replayPendingBatchesOnSnapshot(
+          stale.content,
+          pendingBatches(),
+        );
         outstandingRef.current = null;
-        bufferRef.current = [];
+        bufferRef.current = replay.batches;
         revisionRef.current = stale.revision;
         snapshotRef.current = { content: stale.content };
         bridgeRef.current?.reset(stale.content);
-        patchState({ revision: stale.revision, syncedRevision: stale.revision, unsent: false });
+        const replayOps = visualReplayOps(replay.batches);
+        if (replayOps.length > 0) bridgeRef.current?.applyRemote(replayOps);
+        updatePendingState({
+          revision: stale.revision,
+          syncedRevision: stale.revision,
+        });
+        if (replayOps.length > 0) queueMicrotask(() => void pumpRef.current());
         return;
       }
       if (!res.ok) throw new Error(`operations failed: ${res.status}`);
-    } catch {
+
+      const ack = (await res.json().catch(() => null)) as OperationAck | null;
+      const ackMatchesPending = !ack?.clientMutationId || ack.clientMutationId === pending.id;
+      const completed = outstandingRef.current?.id === pending.id
+        ? outstandingRef.current
+        : null;
+
+      if (!ackMatchesPending || !completed) {
+        // The server may have sent the SSE self-echo first. Never let this
+        // late HTTP acknowledgement clear or rebase a later outstanding batch;
+        // it can only contribute durable-save metadata for its own revision.
+        if (ack?.savedAt) {
+          sseAcknowledgedMutationIdsRef.current.delete(pending.id);
+          const savedAt = ack.savedAt;
+          const savedRevision = ack.revision;
+          const savedMode = ack.mode;
+          setState((prev) => {
+            const canAdvanceSavedAt =
+              savedRevision > prev.syncedRevision ||
+              (savedRevision === prev.syncedRevision && prev.savedAt === null);
+            return canAdvanceSavedAt
+              ? {
+                  ...prev,
+                  syncedRevision: savedRevision,
+                  savedAt,
+                  cacheMode: savedMode ?? prev.cacheMode,
+                }
+              : prev;
+          });
+        }
+        return;
+      }
+
+      const ackOps = ack?.ops ?? completed.ops;
+      const ackRevision = ack?.revision ?? revisionRef.current;
+      const hasUnseenServerOps = ackRevision > revisionRef.current + ackOps.length;
+      const needsAuthoritativeContentReset = Boolean(
+        ack?.content !== undefined && (hasUnseenServerOps || ack.duplicate),
+      );
+
       outstandingRef.current = null;
-      bufferRef.current = [];
-      patchState({ unsent: false });
+
+      if (needsAuthoritativeContentReset && ack?.content !== undefined) {
+        const replay = replayPendingBatchesOnSnapshot(ack.content, bufferRef.current);
+        bufferRef.current = replay.batches;
+        snapshotRef.current = { content: ack.content };
+        bridgeRef.current?.reset(ack.content);
+        const replayOps = visualReplayOps(replay.batches);
+        if (replayOps.length > 0) bridgeRef.current?.applyRemote(replayOps);
+      } else if (snapshotRef.current) {
+        for (const op of ackOps) {
+          if (opWithinBounds(op, snapshotRef.current.content.length)) {
+            snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
+          }
+        }
+      }
+
+      const nextRevision = hasUnseenServerOps
+        ? ackRevision
+        : Math.max(revisionRef.current, ackRevision);
+      revisionRef.current = nextRevision;
+      if (ack?.savedAt) sseAcknowledgedMutationIdsRef.current.delete(pending.id);
+      setState((prev) => {
+        const canAdvanceSavedAt = Boolean(
+          ack?.savedAt &&
+          (ackRevision > prev.syncedRevision ||
+            (ackRevision === prev.syncedRevision && prev.savedAt === null)),
+        );
+        return {
+          ...prev,
+          revision: nextRevision,
+          syncedRevision: canAdvanceSavedAt ? ackRevision : prev.syncedRevision,
+          savedAt: canAdvanceSavedAt ? ack?.savedAt ?? prev.savedAt : prev.savedAt,
+          cacheMode: canAdvanceSavedAt ? ack?.mode ?? prev.cacheMode : prev.cacheMode,
+          unsent: hasPending(),
+        };
+      });
+      void pumpRef.current();
+    } catch {
+      // Requeue the request's immutable mutation id, even if its SSE echo
+      // already released it. The server can safely identify it as a duplicate
+      // and retry persistence without applying the text operation again.
+      const stillOutstanding = outstandingRef.current?.id === pending.id;
+      const alreadyQueued = bufferRef.current.some((batch) => batch.id === pending.id);
+      if (!alreadyQueued) {
+        const retry = sseAcknowledgedMutationIdsRef.current.has(pending.id)
+          ? { ...pending, serverAccepted: true }
+          : pending;
+        bufferRef.current = [retry, ...bufferRef.current];
+      }
+      if (stillOutstanding) outstandingRef.current = null;
+      updatePendingState();
       sourceRef.current?.close();
       sourceRef.current = null;
       fetchControllerRef.current?.abort();
       fetchControllerRef.current = null;
       patchState({ connection: "reconnecting" });
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = setTimeout(
         () => void openStreamRef.current(),
         RECONNECT_DELAY_MS,
       );
     }
-  }, [roomCode, patchState]);
+  }, [roomCode, patchState, pendingBatches, updatePendingState, hasPending]);
 
   const pumpRef = useRef(pump);
   useEffect(() => {
+    // A stable pump ref lets async stream handlers call the latest sender without
+    // re-subscribing the SSE connection on every queue-state change.
+    // eslint-disable-next-line react-hooks/immutability
     pumpRef.current = pump;
   }, [pump]);
 
@@ -178,11 +414,20 @@ export function useCollaborativeDocument(roomCode: string) {
           failuresRef.current = 0;
           connectionIdRef.current = event.sessionId;
           selfUserIdRef.current = event.you.user.id;
+          const acceptedMutationIds = new Set(event.acceptedMutationIds ?? []);
+          const pending = dropAcceptedPendingBatches(
+            pendingBatches(),
+            acceptedMutationIds,
+          );
+          const replay = replayPendingBatchesOnSnapshot(event.content, pending);
+          const replayOps = visualReplayOps(replay.batches);
+
           revisionRef.current = event.revision;
           outstandingRef.current = null;
-          bufferRef.current = [];
+          bufferRef.current = replay.batches;
           snapshotRef.current = { content: event.content };
           bridgeRef.current?.reset(event.content);
+          if (replayOps.length > 0) bridgeRef.current?.applyRemote(replayOps);
           setState((prev) => ({
             ...prev,
             connection: "connected",
@@ -198,42 +443,85 @@ export function useCollaborativeDocument(roomCode: string) {
             revision: event.revision,
             syncedRevision: event.revision,
             cacheMode: event.cacheMode,
-            unsent: false,
+            unsent: hasPending(),
           }));
+          if (replayOps.length > 0) queueMicrotask(() => void pumpRef.current());
           break;
         }
         case "op": {
-          if (snapshotRef.current && event.ops.length > 0) {
-            for (const op of event.ops) {
-              snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
-            }
+          const revisionState = classifyServerOpRevision(
+            revisionRef.current,
+            event.revision,
+            event.ops.length,
+          );
+          if (revisionState === "stale") break;
+          if (revisionState === "gap") {
+            sourceRef.current?.close();
+            sourceRef.current = null;
+            fetchControllerRef.current?.abort();
+            fetchControllerRef.current = null;
+            scheduleReconnect();
+            break;
           }
+
           if (event.by === connectionIdRef.current) {
+            const outstanding = outstandingRef.current;
+            const matchesOutstanding = Boolean(
+              outstanding &&
+                (!event.clientMutationId || outstanding.id === event.clientMutationId),
+            );
+
+            if (matchesOutstanding && snapshotRef.current && event.ops.length > 0) {
+              for (const op of event.ops) {
+                if (opWithinBounds(op, snapshotRef.current.content.length)) {
+                  snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
+                }
+              }
+            }
+
+            if (matchesOutstanding) {
+              sseAcknowledgedMutationIdsRef.current.add(
+                event.clientMutationId ?? outstanding!.id,
+              );
+              outstandingRef.current = null;
+            } else if (event.clientMutationId) {
+              bufferRef.current = bufferRef.current.filter(
+                (batch) => batch.id !== event.clientMutationId,
+              );
+            }
+
             revisionRef.current = event.revision;
-            outstandingRef.current = null;
             setState((prev) => ({
               ...prev,
               revision: event.revision,
-              unsent: bufferRef.current.length > 0,
+              unsent: hasPending(),
             }));
             void pumpRef.current();
             break;
           }
-          const preceding = [
-            ...(outstandingRef.current ?? []),
-            ...bufferRef.current,
-          ];
+
+          if (snapshotRef.current && event.ops.length > 0) {
+            for (const op of event.ops) {
+              if (opWithinBounds(op, snapshotRef.current.content.length)) {
+                snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
+              }
+            }
+          }
+
+          const preceding = visualReplayOps(pendingBatches());
           const visual = rebaseSequentialOps(event.ops, preceding);
           if (outstandingRef.current) {
-            outstandingRef.current = rebaseSequentialOps(
-              outstandingRef.current,
-              event.ops,
-            );
+            outstandingRef.current =
+              rebasePendingBatchesAgainstOps([outstandingRef.current], event.ops)[0] ?? null;
           }
-          bufferRef.current = rebaseSequentialOps(bufferRef.current, event.ops);
+          bufferRef.current = rebasePendingBatchesAgainstOps(bufferRef.current, event.ops);
           if (visual.length > 0) bridgeRef.current?.applyRemote(visual);
           revisionRef.current = event.revision;
-          setState((prev) => ({ ...prev, revision: event.revision }));
+          setState((prev) => ({
+            ...prev,
+            revision: event.revision,
+            unsent: hasPending(),
+          }));
           break;
         }
         case "presence": {
@@ -354,17 +642,35 @@ export function useCollaborativeDocument(roomCode: string) {
           break;
         }
         case "saved": {
-          setState((prev) => ({
-            ...prev,
-            syncedRevision: Math.max(prev.syncedRevision, event.revision),
-            savedAt: event.savedAt,
-            cacheMode: event.mode,
-          }));
+          setState((prev) => {
+            // Durable writes may finish out of order after their live ops have
+            // already been delivered. Do not let an older saved event replace
+            // the timestamp associated with a newer confirmed revision.
+            const canAdvanceSavedAt =
+              event.revision > prev.syncedRevision ||
+              (event.revision === prev.syncedRevision && prev.savedAt === null);
+            return canAdvanceSavedAt
+              ? {
+                  ...prev,
+                  syncedRevision: event.revision,
+                  savedAt: event.savedAt,
+                  cacheMode: event.mode,
+                }
+              : prev;
+          });
           break;
         }
         case "error":
           break;
       }
+    };
+
+    const streamUrl = () => {
+      const params = new URLSearchParams();
+      const replace = connectionIdRef.current;
+      if (/^c_[a-f0-9]{18}$/.test(replace)) params.set("replace", replace);
+      const query = params.toString();
+      return `/api/rooms/${encodeURIComponent(roomCode)}/stream${query ? `?${query}` : ""}`;
     };
 
     const parseSseChunk = (chunk: string, buffer: { text: string }) => {
@@ -398,7 +704,7 @@ export function useCollaborativeDocument(roomCode: string) {
         fetchControllerRef.current = controller;
 
         const res = await apiFetch(
-          `/api/rooms/${encodeURIComponent(roomCode)}/stream`,
+          streamUrl(),
           {
             method: "GET",
             headers: { Accept: "text/event-stream" },
@@ -431,6 +737,11 @@ export function useCollaborativeDocument(roomCode: string) {
             }
           }
         }
+
+        if (!disposed && !controller.signal.aborted) {
+          fetchControllerRef.current = null;
+          scheduleReconnect();
+        }
       } catch (err) {
         if (disposed) return;
         if ((err as any)?.name === "AbortError") return;
@@ -442,7 +753,7 @@ export function useCollaborativeDocument(roomCode: string) {
     const openEventSource = async () => {
       if (disposed) return;
       const source = new EventSource(
-        `/api/rooms/${encodeURIComponent(roomCode)}/stream`,
+        streamUrl(),
         { withCredentials: true } as EventSourceInit,
       );
       sourceRef.current = source;
@@ -515,6 +826,7 @@ export function useCollaborativeDocument(roomCode: string) {
         return;
       }
       patchState({ connection: "reconnecting" });
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = setTimeout(
         () => void openStreamRef.current(),
         RECONNECT_DELAY_MS,
@@ -556,19 +868,21 @@ export function useCollaborativeDocument(roomCode: string) {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (presenceTimerRef.current) clearInterval(presenceTimerRef.current);
     };
-  }, [roomCode, patchState]);
+  }, [roomCode, patchState, pendingBatches, hasPending]);
 
   const setBridge = useCallback((bridge: EditorBridge | null) => {
     bridgeRef.current = bridge;
     if (bridge && snapshotRef.current) {
       bridge.reset(snapshotRef.current.content);
+      const replayOps = visualReplayOps(pendingBatches());
+      if (replayOps.length > 0) bridge.applyRemote(replayOps);
     }
-  }, []);
+  }, [pendingBatches]);
 
   const submitLocalOps = useCallback(
     (ops: TextOp[]) => {
       if (ops.length === 0) return;
-      bufferRef.current.push(...ops);
+      bufferRef.current.push({ id: createClientMutationId(), ops });
       patchState({ unsent: true });
       void pumpRef.current();
     },
