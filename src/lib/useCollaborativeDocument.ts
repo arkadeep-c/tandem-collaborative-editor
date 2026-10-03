@@ -66,6 +66,8 @@ type SessionResponse = {
 export interface PendingOperationBatch {
   id: string;
   ops: TextOp[];
+  /** The live SSE stream already applied this batch to the hot snapshot. */
+  serverAccepted?: boolean;
 }
 
 function createClientMutationId(): string {
@@ -90,6 +92,14 @@ export function replayPendingBatchesOnSnapshot(
   const replayed: PendingOperationBatch[] = [];
 
   for (const batch of batches) {
+    // A failed POST can be retried after its SSE echo has already applied the
+    // operation to this server snapshot. Keep that id in the send queue, but
+    // never visually replay its text a second time.
+    if (batch.serverAccepted) {
+      replayed.push(batch);
+      continue;
+    }
+
     const ops: TextOp[] = [];
     for (const op of batch.ops) {
       if (!opWithinBounds(op, nextContent.length)) continue;
@@ -102,15 +112,23 @@ export function replayPendingBatchesOnSnapshot(
   return { content: nextContent, batches: replayed };
 }
 
+export function visualReplayOps(
+  batches: readonly PendingOperationBatch[],
+): TextOp[] {
+  return flattenPendingOps(batches.filter((batch) => !batch.serverAccepted));
+}
+
 export function rebasePendingBatchesAgainstOps(
   batches: readonly PendingOperationBatch[],
   against: readonly TextOp[],
 ): PendingOperationBatch[] {
   return batches
-    .map((batch) => ({
-      ...batch,
-      ops: rebaseSequentialOps(batch.ops, [...against]),
-    }))
+    .map((batch) => batch.serverAccepted
+      ? batch
+      : {
+          ...batch,
+          ops: rebaseSequentialOps(batch.ops, [...against]),
+        })
     .filter((batch) => batch.ops.length > 0);
 }
 
@@ -174,6 +192,7 @@ export function useCollaborativeDocument(roomCode: string) {
   const revisionRef = useRef(0);
   const outstandingRef = useRef<PendingOperationBatch | null>(null);
   const bufferRef = useRef<PendingOperationBatch[]>([]);
+  const sseAcknowledgedMutationIdsRef = useRef(new Set<string>());
   const bridgeRef = useRef<EditorBridge | null>(null);
   const snapshotRef = useRef<{ content: string } | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
@@ -242,6 +261,11 @@ export function useCollaborativeDocument(roomCode: string) {
       );
 
       if (res.status === 409) {
+        // The op SSE echo can release this batch and start a newer one before
+        // this POST response arrives. A stale response must never reset that
+        // newer local state.
+        if (outstandingRef.current?.id !== pending.id) return;
+
         const stale = (await res.json()) as {
           revision: number;
           content: string;
@@ -255,7 +279,7 @@ export function useCollaborativeDocument(roomCode: string) {
         revisionRef.current = stale.revision;
         snapshotRef.current = { content: stale.content };
         bridgeRef.current?.reset(stale.content);
-        const replayOps = flattenPendingOps(replay.batches);
+        const replayOps = visualReplayOps(replay.batches);
         if (replayOps.length > 0) bridgeRef.current?.applyRemote(replayOps);
         updatePendingState({
           revision: stale.revision,
@@ -267,8 +291,38 @@ export function useCollaborativeDocument(roomCode: string) {
       if (!res.ok) throw new Error(`operations failed: ${res.status}`);
 
       const ack = (await res.json().catch(() => null)) as OperationAck | null;
-      const completed = outstandingRef.current;
-      const ackOps = ack?.ops ?? completed?.ops ?? [];
+      const ackMatchesPending = !ack?.clientMutationId || ack.clientMutationId === pending.id;
+      const completed = outstandingRef.current?.id === pending.id
+        ? outstandingRef.current
+        : null;
+
+      if (!ackMatchesPending || !completed) {
+        // The server may have sent the SSE self-echo first. Never let this
+        // late HTTP acknowledgement clear or rebase a later outstanding batch;
+        // it can only contribute durable-save metadata for its own revision.
+        if (ack?.savedAt) {
+          sseAcknowledgedMutationIdsRef.current.delete(pending.id);
+          const savedAt = ack.savedAt;
+          const savedRevision = ack.revision;
+          const savedMode = ack.mode;
+          setState((prev) => {
+            const canAdvanceSavedAt =
+              savedRevision > prev.syncedRevision ||
+              (savedRevision === prev.syncedRevision && prev.savedAt === null);
+            return canAdvanceSavedAt
+              ? {
+                  ...prev,
+                  syncedRevision: savedRevision,
+                  savedAt,
+                  cacheMode: savedMode ?? prev.cacheMode,
+                }
+              : prev;
+          });
+        }
+        return;
+      }
+
+      const ackOps = ack?.ops ?? completed.ops;
       const ackRevision = ack?.revision ?? revisionRef.current;
       const hasUnseenServerOps = ackRevision > revisionRef.current + ackOps.length;
       const needsAuthoritativeContentReset = Boolean(
@@ -277,14 +331,14 @@ export function useCollaborativeDocument(roomCode: string) {
 
       outstandingRef.current = null;
 
-      if (completed && needsAuthoritativeContentReset && ack?.content !== undefined) {
+      if (needsAuthoritativeContentReset && ack?.content !== undefined) {
         const replay = replayPendingBatchesOnSnapshot(ack.content, bufferRef.current);
         bufferRef.current = replay.batches;
         snapshotRef.current = { content: ack.content };
         bridgeRef.current?.reset(ack.content);
-        const replayOps = flattenPendingOps(replay.batches);
+        const replayOps = visualReplayOps(replay.batches);
         if (replayOps.length > 0) bridgeRef.current?.applyRemote(replayOps);
-      } else if (completed && snapshotRef.current) {
+      } else if (snapshotRef.current) {
         for (const op of ackOps) {
           if (opWithinBounds(op, snapshotRef.current.content.length)) {
             snapshotRef.current.content = applyOp(snapshotRef.current.content, op);
@@ -296,22 +350,36 @@ export function useCollaborativeDocument(roomCode: string) {
         ? ackRevision
         : Math.max(revisionRef.current, ackRevision);
       revisionRef.current = nextRevision;
-      setState((prev) => ({
-        ...prev,
-        revision: nextRevision,
-        syncedRevision: ack?.savedAt
-          ? Math.max(prev.syncedRevision, ack.revision)
-          : prev.syncedRevision,
-        savedAt: ack?.savedAt ?? prev.savedAt,
-        cacheMode: ack?.mode ?? prev.cacheMode,
-        unsent: hasPending(),
-      }));
+      if (ack?.savedAt) sseAcknowledgedMutationIdsRef.current.delete(pending.id);
+      setState((prev) => {
+        const canAdvanceSavedAt = Boolean(
+          ack?.savedAt &&
+          (ackRevision > prev.syncedRevision ||
+            (ackRevision === prev.syncedRevision && prev.savedAt === null)),
+        );
+        return {
+          ...prev,
+          revision: nextRevision,
+          syncedRevision: canAdvanceSavedAt ? ackRevision : prev.syncedRevision,
+          savedAt: canAdvanceSavedAt ? ack?.savedAt ?? prev.savedAt : prev.savedAt,
+          cacheMode: canAdvanceSavedAt ? ack?.mode ?? prev.cacheMode : prev.cacheMode,
+          unsent: hasPending(),
+        };
+      });
       void pumpRef.current();
     } catch {
-      if (outstandingRef.current) {
-        bufferRef.current = [outstandingRef.current, ...bufferRef.current];
+      // Requeue the request's immutable mutation id, even if its SSE echo
+      // already released it. The server can safely identify it as a duplicate
+      // and retry persistence without applying the text operation again.
+      const stillOutstanding = outstandingRef.current?.id === pending.id;
+      const alreadyQueued = bufferRef.current.some((batch) => batch.id === pending.id);
+      if (!alreadyQueued) {
+        const retry = sseAcknowledgedMutationIdsRef.current.has(pending.id)
+          ? { ...pending, serverAccepted: true }
+          : pending;
+        bufferRef.current = [retry, ...bufferRef.current];
       }
-      outstandingRef.current = null;
+      if (stillOutstanding) outstandingRef.current = null;
       updatePendingState();
       sourceRef.current?.close();
       sourceRef.current = null;
@@ -351,17 +419,8 @@ export function useCollaborativeDocument(roomCode: string) {
             pendingBatches(),
             acceptedMutationIds,
           );
-          const previousSnapshot = snapshotRef.current?.content ?? "";
-          const optimistic = replayPendingBatchesOnSnapshot(previousSnapshot, pending);
-          const pendingOps = flattenPendingOps(pending);
-          const serverAlreadyHasPending =
-            pendingOps.length > 0 &&
-            flattenPendingOps(optimistic.batches).length === pendingOps.length &&
-            optimistic.content === event.content;
-          const replay = serverAlreadyHasPending
-            ? { content: event.content, batches: [] as PendingOperationBatch[] }
-            : replayPendingBatchesOnSnapshot(event.content, pending);
-          const replayOps = flattenPendingOps(replay.batches);
+          const replay = replayPendingBatchesOnSnapshot(event.content, pending);
+          const replayOps = visualReplayOps(replay.batches);
 
           revisionRef.current = event.revision;
           outstandingRef.current = null;
@@ -421,6 +480,9 @@ export function useCollaborativeDocument(roomCode: string) {
             }
 
             if (matchesOutstanding) {
+              sseAcknowledgedMutationIdsRef.current.add(
+                event.clientMutationId ?? outstanding!.id,
+              );
               outstandingRef.current = null;
             } else if (event.clientMutationId) {
               bufferRef.current = bufferRef.current.filter(
@@ -446,7 +508,7 @@ export function useCollaborativeDocument(roomCode: string) {
             }
           }
 
-          const preceding = flattenPendingOps(pendingBatches());
+          const preceding = visualReplayOps(pendingBatches());
           const visual = rebaseSequentialOps(event.ops, preceding);
           if (outstandingRef.current) {
             outstandingRef.current =
@@ -580,12 +642,22 @@ export function useCollaborativeDocument(roomCode: string) {
           break;
         }
         case "saved": {
-          setState((prev) => ({
-            ...prev,
-            syncedRevision: Math.max(prev.syncedRevision, event.revision),
-            savedAt: event.savedAt,
-            cacheMode: event.mode,
-          }));
+          setState((prev) => {
+            // Durable writes may finish out of order after their live ops have
+            // already been delivered. Do not let an older saved event replace
+            // the timestamp associated with a newer confirmed revision.
+            const canAdvanceSavedAt =
+              event.revision > prev.syncedRevision ||
+              (event.revision === prev.syncedRevision && prev.savedAt === null);
+            return canAdvanceSavedAt
+              ? {
+                  ...prev,
+                  syncedRevision: event.revision,
+                  savedAt: event.savedAt,
+                  cacheMode: event.mode,
+                }
+              : prev;
+          });
           break;
         }
         case "error":
@@ -802,7 +874,7 @@ export function useCollaborativeDocument(roomCode: string) {
     bridgeRef.current = bridge;
     if (bridge && snapshotRef.current) {
       bridge.reset(snapshotRef.current.content);
-      const replayOps = flattenPendingOps(pendingBatches());
+      const replayOps = visualReplayOps(pendingBatches());
       if (replayOps.length > 0) bridge.applyRemote(replayOps);
     }
   }, [pendingBatches]);
