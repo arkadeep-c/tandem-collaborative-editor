@@ -1444,6 +1444,11 @@ function stageText(stage: PistonStage | undefined, stream: "stdout" | "stderr"):
   return stage.output ?? "";
 }
 
+function pistonAuthHeaders(): Record<string, string> {
+  const key = process.env.TANDEM_EXECUTION_KEY?.trim();
+  return key ? { "X-Tandem-Execution-Key": key, "ngrok-skip-browser-warning": "true" } : {};
+}
+
 function limitPistonOutput(text: string): { text: string; truncated: boolean } {
   const bytes = Buffer.byteLength(text, "utf8");
   if (bytes <= OUTPUT_LIMIT_BYTES) return { text, truncated: false };
@@ -1462,7 +1467,7 @@ async function fetchPistonRuntimes(
   signal?: AbortSignal,
 ): Promise<PistonRuntime[]> {
   const response = await fetch(`${baseUrl}/api/v2/runtimes`, {
-    headers: { Accept: "application/json" },
+    headers: { Accept: "application/json", ...pistonAuthHeaders() },
     signal,
   });
   if (!response.ok) {
@@ -1586,6 +1591,7 @@ async function executePistonCode(
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
+      ...pistonAuthHeaders(),
     },
     signal,
     body: JSON.stringify({
